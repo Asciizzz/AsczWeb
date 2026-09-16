@@ -4,9 +4,9 @@ export {
     type SocketOptions,
 } from "./socket.js";
 export {
-    CircuitNode,
-    NodeProxy,
-} from "./node.js";
+    Chip,
+    ChipProxy,
+} from "./chip.js";
 export {
     Circuit,
     type CircuitOptions,
@@ -31,7 +31,7 @@ export type {
     CircuitIssue,
     CircuitValidationResult,
     SerializedSocket,
-    SerializedNode,
+    SerializedChip,
     SerializedCircuit,
-    NodeFactory,
+    ChipFactory,
 } from "./types.js";

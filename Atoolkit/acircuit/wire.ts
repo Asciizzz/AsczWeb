@@ -5,17 +5,17 @@
  * - Input sockets enforce 1-to-1 connection.
  */
 export interface Wire {
-    readonly outNodeId: string;
+    readonly outChipId: string;
     readonly outSocket: string;
-    readonly inNodeId: string;
+    readonly inChipId: string;
     readonly inSocket: string;
 }
 
 /**
  * Returns the lookup key for a socket endpoint.
  */
-export function inSocketKey(nodeId: string, socketName: string): string {
-    return `${nodeId}:${socketName}`;
+export function inSocketKey(chipId: string, socketName: string): string {
+    return `${chipId}:${socketName}`;
 }
 
 export const outSocketKey = inSocketKey;
@@ -25,16 +25,16 @@ export const outSocketKey = inSocketKey;
  */
 export function wireEquals(a: Wire, b: Wire): boolean {
     return (
-        a.outNodeId === b.outNodeId &&
+        a.outChipId === b.outChipId &&
         a.outSocket === b.outSocket &&
-        a.inNodeId === b.inNodeId &&
+        a.inChipId === b.inChipId &&
         a.inSocket === b.inSocket
     );
 }
 
 /**
- * Formats a Wire as (outNode:outSocket -> inNode:inSocket).
+ * Formats a Wire as (outChip:outSocket -> inChip:inSocket).
  */
 export function formatWire(wire: Wire): string {
-    return `(${wire.outNodeId}:${wire.outSocket} -> ${wire.inNodeId}:${wire.inSocket})`;
+    return `(${wire.outChipId}:${wire.outSocket} -> ${wire.inChipId}:${wire.inSocket})`;
 }

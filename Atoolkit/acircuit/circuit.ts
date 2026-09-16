@@ -1,4 +1,4 @@
-import { CircuitNode, NodeProxy } from "./node.js";
+import { Chip, ChipProxy } from "./chip.js";
 import {
     type Wire,
     inSocketKey,
@@ -12,7 +12,7 @@ import type {
     CircuitValidationResult,
     CircuitIssue,
     SerializedCircuit,
-    NodeFactory,
+    ChipFactory,
 } from "./types.js";
 import type { InputSocketMapping, OutputSocketMapping } from "./composite.js";
 
@@ -22,25 +22,25 @@ export interface CircuitOptions {
 
 /**
  * Directed graph with 1-to-1 input wires and 1-to-N output fan-out.
- * Node values exist only in the scope of a run.
+ * Chip values exist only in the scope of a run.
  */
 export class Circuit {
     readonly label: string;
-    readonly nodes = new Map<string, CircuitNode>();
+    readonly chips = new Map<string, Chip>();
 
-    /** Inward wires:  "inNodeId:inSocket"   -> Wire (1-to-1). */
+    /** Inward wires:  "inChipId:inSocket"   -> Wire (1-to-1). */
     private readonly _inWires  = new Map<string, Wire>();
-    /** Outward wires: "outNodeId:outSocket" -> Wire[] (1-to-N). */
+    /** Outward wires: "outChipId:outSocket" -> Wire[] (1-to-N). */
     private readonly _outWires = new Map<string, Wire[]>();
-    /** Inward wires grouped by destination node ID. */
-    private readonly _nodeInWires = new Map<string, Wire[]>();
-    /** Outward wires grouped by source node ID. */
-    private readonly _nodeOutWires = new Map<string, Wire[]>();
+    /** Inward wires grouped by destination chip ID. */
+    private readonly _chipInWires = new Map<string, Wire[]>();
+    /** Outward wires grouped by source chip ID. */
+    private readonly _chipOutWires = new Map<string, Wire[]>();
 
     private _dirtyTopo = true;
-    private _cachedOrder: CircuitNode[] = [];
+    private _cachedOrder: Chip[] = [];
     private _cachedPlan: Array<{
-        node: CircuitNode;
+        chip: Chip;
         inputSockets: string[];
         wires: Array<Wire | undefined>;
     }> = [];
@@ -49,41 +49,41 @@ export class Circuit {
         this.label = options.label ?? "Circuit";
     }
 
-    private _addNodeWire(map: Map<string, Wire[]>, nodeId: string, wire: Wire): void {
-        const list = map.get(nodeId);
+    private _addChipWire(map: Map<string, Wire[]>, chipId: string, wire: Wire): void {
+        const list = map.get(chipId);
         if (list) list.push(wire);
-        else map.set(nodeId, [wire]);
+        else map.set(chipId, [wire]);
     }
 
-    private _removeNodeWire(map: Map<string, Wire[]>, nodeId: string, wire: Wire): void {
-        const list = map.get(nodeId);
+    private _removeChipWire(map: Map<string, Wire[]>, chipId: string, wire: Wire): void {
+        const list = map.get(chipId);
         if (list) {
             const idx = list.findIndex(candidate => wireEquals(candidate, wire));
             if (idx >= 0) list.splice(idx, 1);
-            if (list.length === 0) map.delete(nodeId);
+            if (list.length === 0) map.delete(chipId);
         }
     }
 
-    addNode(node: CircuitNode): this {
-        if (!this.nodes.has(node.id)) {
-            this.nodes.set(node.id, node);
+    addChip(chip: Chip): this {
+        if (!this.chips.has(chip.id)) {
+            this.chips.set(chip.id, chip);
             this._dirtyTopo = true;
         }
         return this;
     }
 
-    hasNode(id: string): boolean {
-        return this.nodes.has(id);
+    hasChip(id: string): boolean {
+        return this.chips.has(id);
     }
 
-    getNode<T extends CircuitNode = CircuitNode>(id: string): T | undefined {
-        return this.nodes.get(id) as T | undefined;
+    getChip<T extends Chip = Chip>(id: string): T | undefined {
+        return this.chips.get(id) as T | undefined;
     }
 
-    removeNode(nodeOrId: CircuitNode | string): this {
-        const id = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
+    removeChip(chipOrId: Chip | string): this {
+        const id = typeof chipOrId === "string" ? chipOrId : chipOrId.id;
         this.disconnectAll(id);
-        if (this.nodes.delete(id)) {
+        if (this.chips.delete(id)) {
             this._dirtyTopo = true;
         }
         return this;
@@ -94,121 +94,121 @@ export class Circuit {
      * connection on the destination input.
      */
     connect(
-        outNodeOrId: CircuitNode | string,
+        outChipOrId: Chip | string,
         outSocketName: string,
-        inNodeOrId: CircuitNode | string,
+        inChipOrId: Chip | string,
         inSocketName: string
     ): Wire {
-        const outNode = typeof outNodeOrId === "string" ? this.getNode(outNodeOrId) : outNodeOrId;
-        const inNode = typeof inNodeOrId === "string" ? this.getNode(inNodeOrId) : inNodeOrId;
+        const outChip = typeof outChipOrId === "string" ? this.getChip(outChipOrId) : outChipOrId;
+        const inChip = typeof inChipOrId === "string" ? this.getChip(inChipOrId) : inChipOrId;
 
-        if (!outNode) throw new Error(`[Circuit] Output node "${String(outNodeOrId)}" not found in graph.`);
-        if (!inNode) throw new Error(`[Circuit] Input node "${String(inNodeOrId)}" not found in graph.`);
+        if (!outChip) throw new Error(`[Circuit] Output chip "${String(outChipOrId)}" not found in graph.`);
+        if (!inChip) throw new Error(`[Circuit] Input chip "${String(inChipOrId)}" not found in graph.`);
 
-        const registeredOut = this.nodes.get(outNode.id);
-        const registeredIn = this.nodes.get(inNode.id);
-        if (registeredOut && registeredOut !== outNode) {
-            throw new Error(`[Circuit] Node id "${outNode.id}" is already registered with a different output node.`);
+        const registeredOut = this.chips.get(outChip.id);
+        const registeredIn = this.chips.get(inChip.id);
+        if (registeredOut && registeredOut !== outChip) {
+            throw new Error(`[Circuit] Chip id "${outChip.id}" is already registered with a different output chip.`);
         }
-        if (registeredIn && registeredIn !== inNode) {
-            throw new Error(`[Circuit] Node id "${inNode.id}" is already registered with a different input node.`);
-        }
-
-        this.addNode(outNode);
-        this.addNode(inNode);
-
-        if (!outNode.getOutput(outSocketName)) {
-            throw new Error(`[Circuit] Node "${outNode.id}" has no output socket named "${outSocketName}".`);
-        }
-        if (!inNode.getInput(inSocketName)) {
-            throw new Error(`[Circuit] Node "${inNode.id}" has no input socket named "${inSocketName}".`);
-        }
-        if (!inNode.canConnectInput(inSocketName, outNode, outSocketName)) {
-            throw new Error(`[Circuit] Connection rejected by node "${inNode.id}" on input socket "${inSocketName}".`);
+        if (registeredIn && registeredIn !== inChip) {
+            throw new Error(`[Circuit] Chip id "${inChip.id}" is already registered with a different input chip.`);
         }
 
-        this.disconnect(inNode.id, inSocketName);
+        this.addChip(outChip);
+        this.addChip(inChip);
+
+        if (!outChip.getOutput(outSocketName)) {
+            throw new Error(`[Circuit] Chip "${outChip.id}" has no output socket named "${outSocketName}".`);
+        }
+        if (!inChip.getInput(inSocketName)) {
+            throw new Error(`[Circuit] Chip "${inChip.id}" has no input socket named "${inSocketName}".`);
+        }
+        if (!inChip.canConnectInput(inSocketName, outChip, outSocketName)) {
+            throw new Error(`[Circuit] Connection rejected by chip "${inChip.id}" on input socket "${inSocketName}".`);
+        }
+
+        this.disconnect(inChip.id, inSocketName);
 
         const wire: Wire = {
-            outNodeId: outNode.id,
+            outChipId: outChip.id,
             outSocket: outSocketName,
-            inNodeId: inNode.id,
+            inChipId: inChip.id,
             inSocket: inSocketName,
         };
 
-        this._inWires.set(inSocketKey(inNode.id, inSocketName), wire);
-        this._addNodeWire(this._nodeInWires, inNode.id, wire);
+        this._inWires.set(inSocketKey(inChip.id, inSocketName), wire);
+        this._addChipWire(this._chipInWires, inChip.id, wire);
 
-        const outKey = outSocketKey(outNode.id, outSocketName);
+        const outKey = outSocketKey(outChip.id, outSocketName);
         const outWires = this._outWires.get(outKey);
         if (outWires) outWires.push(wire);
         else this._outWires.set(outKey, [wire]);
-        this._addNodeWire(this._nodeOutWires, outNode.id, wire);
+        this._addChipWire(this._chipOutWires, outChip.id, wire);
 
         this._dirtyTopo = true;
         return wire;
     }
 
-    disconnect(wireOrNodeId: Wire | CircuitNode | string, inSocketName?: string): boolean {
+    disconnect(wireOrChipId: Wire | Chip | string, inSocketName?: string): boolean {
         let wire: Wire | undefined;
-        if (typeof wireOrNodeId === "object" && "outNodeId" in wireOrNodeId) {
-            wire = wireOrNodeId;
+        if (typeof wireOrChipId === "object" && "outChipId" in wireOrChipId) {
+            wire = wireOrChipId;
         } else if (inSocketName !== undefined) {
-            const nodeId = typeof wireOrNodeId === "string" ? wireOrNodeId : wireOrNodeId.id;
-            wire = this._inWires.get(inSocketKey(nodeId, inSocketName));
+            const chipId = typeof wireOrChipId === "string" ? wireOrChipId : wireOrChipId.id;
+            wire = this._inWires.get(inSocketKey(chipId, inSocketName));
         }
         if (!wire) return false;
 
-        const inKey = inSocketKey(wire.inNodeId, wire.inSocket);
+        const inKey = inSocketKey(wire.inChipId, wire.inSocket);
         const existing = this._inWires.get(inKey);
         if (!existing || !wireEquals(existing, wire)) return false;
 
         this._inWires.delete(inKey);
-        this._removeNodeWire(this._nodeInWires, wire.inNodeId, wire);
+        this._removeChipWire(this._chipInWires, wire.inChipId, wire);
 
-        const outKey = outSocketKey(wire.outNodeId, wire.outSocket);
+        const outKey = outSocketKey(wire.outChipId, wire.outSocket);
         const outWires = this._outWires.get(outKey);
         if (outWires) {
             const index = outWires.findIndex(candidate => wireEquals(candidate, wire!));
             if (index >= 0) outWires.splice(index, 1);
             if (outWires.length === 0) this._outWires.delete(outKey);
         }
-        this._removeNodeWire(this._nodeOutWires, wire.outNodeId, wire);
+        this._removeChipWire(this._chipOutWires, wire.outChipId, wire);
 
         this._dirtyTopo = true;
         return true;
     }
 
-    disconnectAll(nodeOrId: CircuitNode | string): this {
-        const id = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
+    disconnectAll(chipOrId: Chip | string): this {
+        const id = typeof chipOrId === "string" ? chipOrId : chipOrId.id;
         for (const wire of this.getIncomingWires(id)) this.disconnect(wire);
         for (const wire of this.getOutgoingWires(id)) this.disconnect(wire);
         this._dirtyTopo = true;
         return this;
     }
 
-    getIncomingWire(nodeOrId: CircuitNode | string, socketName: string): Wire | undefined {
-        const id = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
+    getIncomingWire(chipOrId: Chip | string, socketName: string): Wire | undefined {
+        const id = typeof chipOrId === "string" ? chipOrId : chipOrId.id;
         return this._inWires.get(inSocketKey(id, socketName));
     }
 
-    getIncomingWires(nodeOrId: CircuitNode | string): Wire[] {
-        const id = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
-        return [...(this._nodeInWires.get(id) ?? [])];
+    getIncomingWires(chipOrId: Chip | string): Wire[] {
+        const id = typeof chipOrId === "string" ? chipOrId : chipOrId.id;
+        return [...(this._chipInWires.get(id) ?? [])];
     }
 
-    getOutgoingWires(nodeOrId: CircuitNode | string, socketName?: string): Wire[] {
-        const id = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
+    getOutgoingWires(chipOrId: Chip | string, socketName?: string): Wire[] {
+        const id = typeof chipOrId === "string" ? chipOrId : chipOrId.id;
         if (socketName) return [...(this._outWires.get(outSocketKey(id, socketName)) ?? [])];
-        return [...(this._nodeOutWires.get(id) ?? [])];
+        return [...(this._chipOutWires.get(id) ?? [])];
     }
 
     getWires(): Wire[] {
         return Array.from(this._inWires.values());
     }
 
-    /** Returns all nodes in dependency order and rejects cycles. */
-    topoSort<T extends CircuitNode = CircuitNode>(force = false): T[] {
+    /** Returns all chips in dependency order and rejects cycles. */
+    topoSort<T extends Chip = Chip>(force = false): T[] {
         if (!this._dirtyTopo && !force) {
             return this._cachedOrder as T[];
         }
@@ -216,65 +216,65 @@ export class Circuit {
         const inDeps = new Map<string, Set<string>>();
         const outDeps = new Map<string, Set<string>>();
 
-        for (const nodeId of this.nodes.keys()) {
-            inDeps.set(nodeId, new Set());
-            outDeps.set(nodeId, new Set());
+        for (const chipId of this.chips.keys()) {
+            inDeps.set(chipId, new Set());
+            outDeps.set(chipId, new Set());
         }
         for (const wire of this._inWires.values()) {
-            if (!this.nodes.has(wire.outNodeId) || !this.nodes.has(wire.inNodeId)) continue;
-            inDeps.get(wire.inNodeId)!.add(wire.outNodeId);
-            outDeps.get(wire.outNodeId)!.add(wire.inNodeId);
+            if (!this.chips.has(wire.outChipId) || !this.chips.has(wire.inChipId)) continue;
+            inDeps.get(wire.inChipId)!.add(wire.outChipId);
+            outDeps.get(wire.outChipId)!.add(wire.inChipId);
         }
 
         const ready: string[] = [];
-        for (const [nodeId, dependencies] of inDeps) {
-            if (dependencies.size === 0) ready.push(nodeId);
+        for (const [chipId, dependencies] of inDeps) {
+            if (dependencies.size === 0) ready.push(chipId);
         }
 
-        const sorted: CircuitNode[] = [];
+        const sorted: Chip[] = [];
         let head = 0;
         while (head < ready.length) {
-            const nodeId = ready[head++];
-            const node = this.nodes.get(nodeId);
-            if (node) sorted.push(node);
+            const chipId = ready[head++];
+            const chip = this.chips.get(chipId);
+            if (chip) sorted.push(chip);
 
-            for (const dependentId of outDeps.get(nodeId)!) {
+            for (const dependentId of outDeps.get(chipId)!) {
                 const dependencies = inDeps.get(dependentId)!;
-                dependencies.delete(nodeId);
+                dependencies.delete(chipId);
                 if (dependencies.size === 0) ready.push(dependentId);
             }
         }
 
-        if (sorted.length !== this.nodes.size) {
+        if (sorted.length !== this.chips.size) {
             throw new Error(`[Circuit] Cyclic dependency detected in graph "${this.label}".`);
         }
         this._cachedOrder = sorted;
-        this._cachedPlan = sorted.map(node => {
-            const inputSockets = Array.from(node.inputs.keys());
-            const wires = inputSockets.map(s => this.getIncomingWire(node, s));
-            return { node, inputSockets, wires };
+        this._cachedPlan = sorted.map(chip => {
+            const inputSockets = Array.from(chip.inputs.keys());
+            const wires = inputSockets.map(s => this.getIncomingWire(chip, s));
+            return { chip, inputSockets, wires };
         });
         this._dirtyTopo = false;
         return sorted as T[];
     }
 
-    /** Executes nodes in topological order with run-local input and output values. */
-    run<TCtx = unknown>(options: RunOptions<TCtx, CircuitNode> = {}): RunResult<CircuitNode> {
+    /** Executes chips in topological order with run-local input and output values. */
+    run<TCtx = unknown>(options: RunOptions<TCtx, Chip> = {}): RunResult<Chip> {
         this.topoSort();
         const plan = this._cachedPlan;
         const outputs = new Map<string, Record<string, any>>();
-        const executedNodes: CircuitNode[] = [];
-        const errors: Array<{ nodeId: string; error: unknown }> = [];
+        const executedChips: Chip[] = [];
+        const errors: Array<{ chipId: string; error: unknown }> = [];
 
         const ctx: ProcessCtx<TCtx> = { ctx: options.ctx };
         const overrides = options.overrides;
         const onWireTransmit = options.onWireTransmit;
-        const onNodeEnter = options.onNodeEnter;
-        const onNodeLeave = options.onNodeLeave;
+        const onChipEnter = options.onChipEnter;
+        const onChipLeave = options.onChipLeave;
 
         for (let i = 0; i < plan.length; i++) {
             const step = plan[i];
-            const node = step.node;
+            const chip = step.chip;
             const sockets = step.inputSockets;
             const wires = step.wires;
             const socketCount = sockets.length;
@@ -284,35 +284,35 @@ export class Circuit {
                 const socketName = sockets[s];
                 const wire = wires[s];
                 if (!wire) {
-                    inputs[socketName] = overrides?.[node.id]?.[socketName];
+                    inputs[socketName] = overrides?.[chip.id]?.[socketName];
                     continue;
                 }
 
-                const value = outputs.get(wire.outNodeId)?.[wire.outSocket];
+                const value = outputs.get(wire.outChipId)?.[wire.outSocket];
                 inputs[socketName] = value;
                 if (value !== undefined) onWireTransmit?.(wire, value);
             }
 
-            onNodeEnter?.(node, inputs);
+            onChipEnter?.(chip, inputs);
 
-            let nodeOutputs: Record<string, any> = {};
+            let chipOutputs: Record<string, any> = {};
             try {
-                nodeOutputs = node.process(inputs, ctx);
+                chipOutputs = chip.process(inputs, ctx);
             } catch (error) {
-                errors.push({ nodeId: node.id, error });
+                errors.push({ chipId: chip.id, error });
             }
 
-            outputs.set(node.id, nodeOutputs);
-            executedNodes.push(node);
-            onNodeLeave?.(node, nodeOutputs);
+            outputs.set(chip.id, chipOutputs);
+            executedChips.push(chip);
+            onChipLeave?.(chip, chipOutputs);
         }
 
-        return { outputs, executedNodes, errors };
+        return { outputs, executedChips, errors };
     }
 
     /**
      * Statically analyzes graph topology without throwing errors.
-     * Identifies cycles, missing required inputs, type mismatches, and isolated nodes.
+     * Identifies cycles, missing required inputs, type mismatches, and isolated chips.
      */
     validate(): CircuitValidationResult {
         const issues: CircuitIssue[] = [];
@@ -321,34 +321,34 @@ export class Circuit {
         const inDeps = new Map<string, Set<string>>();
         const outDeps = new Map<string, Set<string>>();
 
-        for (const nodeId of this.nodes.keys()) {
-            inDeps.set(nodeId, new Set());
-            outDeps.set(nodeId, new Set());
+        for (const chipId of this.chips.keys()) {
+            inDeps.set(chipId, new Set());
+            outDeps.set(chipId, new Set());
         }
         for (const wire of this._inWires.values()) {
-            if (!this.nodes.has(wire.outNodeId) || !this.nodes.has(wire.inNodeId)) continue;
-            inDeps.get(wire.inNodeId)!.add(wire.outNodeId);
-            outDeps.get(wire.outNodeId)!.add(wire.inNodeId);
+            if (!this.chips.has(wire.outChipId) || !this.chips.has(wire.inChipId)) continue;
+            inDeps.get(wire.inChipId)!.add(wire.outChipId);
+            outDeps.get(wire.outChipId)!.add(wire.inChipId);
         }
 
         const ready: string[] = [];
-        for (const [nodeId, dependencies] of inDeps) {
-            if (dependencies.size === 0) ready.push(nodeId);
+        for (const [chipId, dependencies] of inDeps) {
+            if (dependencies.size === 0) ready.push(chipId);
         }
 
         let processed = 0;
         let head = 0;
         while (head < ready.length) {
-            const nodeId = ready[head++];
+            const chipId = ready[head++];
             processed++;
-            for (const dependentId of outDeps.get(nodeId)!) {
+            for (const dependentId of outDeps.get(chipId)!) {
                 const dependencies = inDeps.get(dependentId)!;
-                dependencies.delete(nodeId);
+                dependencies.delete(chipId);
                 if (dependencies.size === 0) ready.push(dependentId);
             }
         }
 
-        if (processed !== this.nodes.size) {
+        if (processed !== this.chips.size) {
             issues.push({
                 type: "cycle",
                 message: `Cyclic dependency detected in graph "${this.label}".`,
@@ -356,13 +356,13 @@ export class Circuit {
         }
 
         // 2. Missing required inputs pass
-        for (const node of this.nodes.values()) {
-            for (const socket of node.inputs.values()) {
-                if (socket.required && !this.getIncomingWire(node.id, socket.name)) {
+        for (const chip of this.chips.values()) {
+            for (const socket of chip.inputs.values()) {
+                if (socket.required && !this.getIncomingWire(chip.id, socket.name)) {
                     issues.push({
                         type: "missing_input",
-                        message: `Required input "${socket.name}" on node "${node.id}" has no incoming wire.`,
-                        nodeId: node.id,
+                        message: `Required input "${socket.name}" on chip "${chip.id}" has no incoming wire.`,
+                        chipId: chip.id,
                         socketName: socket.name,
                     });
                 }
@@ -371,20 +371,20 @@ export class Circuit {
 
         // 3. Socket type mismatch pass
         for (const wire of this._inWires.values()) {
-            const outNode = this.nodes.get(wire.outNodeId);
-            const inNode = this.nodes.get(wire.inNodeId);
-            if (!outNode || !inNode) continue;
+            const outChip = this.chips.get(wire.outChipId);
+            const inChip = this.chips.get(wire.inChipId);
+            if (!outChip || !inChip) continue;
 
-            const outSocket = outNode.getOutput(wire.outSocket);
-            const inSocket = inNode.getInput(wire.inSocket);
+            const outSocket = outChip.getOutput(wire.outSocket);
+            const inSocket = inChip.getInput(wire.inSocket);
             if (!outSocket || !inSocket) continue;
 
             if (outSocket.dataType !== undefined && inSocket.dataType !== undefined) {
                 if (outSocket.dataType !== "any" && inSocket.dataType !== "any" && outSocket.dataType !== inSocket.dataType) {
                     issues.push({
                         type: "type_mismatch",
-                        message: `Type mismatch on wire (${wire.outNodeId}:${wire.outSocket} [${outSocket.dataType}] -> ${wire.inNodeId}:${wire.inSocket} [${inSocket.dataType}]).`,
-                        nodeId: wire.inNodeId,
+                        message: `Type mismatch on wire (${wire.outChipId}:${wire.outSocket} [${outSocket.dataType}] -> ${wire.inChipId}:${wire.inSocket} [${inSocket.dataType}]).`,
+                        chipId: wire.inChipId,
                         socketName: wire.inSocket,
                         wire,
                     });
@@ -392,15 +392,15 @@ export class Circuit {
             }
         }
 
-        // 4. Isolated nodes pass
-        for (const node of this.nodes.values()) {
-            const inWires = this.getIncomingWires(node.id);
-            const outWires = this.getOutgoingWires(node.id);
+        // 4. Isolated chips pass
+        for (const chip of this.chips.values()) {
+            const inWires = this.getIncomingWires(chip.id);
+            const outWires = this.getOutgoingWires(chip.id);
             if (inWires.length === 0 && outWires.length === 0) {
                 issues.push({
-                    type: "isolated_node",
-                    message: `Node "${node.id}" has zero connections.`,
-                    nodeId: node.id,
+                    type: "isolated_chip",
+                    message: `Chip "${chip.id}" has zero connections.`,
+                    chipId: chip.id,
                 });
             }
         }
@@ -411,32 +411,32 @@ export class Circuit {
         };
     }
 
-    /** Returns nodes with indegree 0 (zero incoming connections). */
-    getSources(): CircuitNode[] {
-        const sources: CircuitNode[] = [];
-        for (const node of this.nodes.values()) {
-            if (this.getIncomingWires(node.id).length === 0) {
-                sources.push(node);
+    /** Returns chips with indegree 0 (zero incoming connections). */
+    getSources(): Chip[] {
+        const sources: Chip[] = [];
+        for (const chip of this.chips.values()) {
+            if (this.getIncomingWires(chip.id).length === 0) {
+                sources.push(chip);
             }
         }
         return sources;
     }
 
-    /** Returns nodes with outdegree 0 (zero outgoing connections). */
-    getSinks(): CircuitNode[] {
-        const sinks: CircuitNode[] = [];
-        for (const node of this.nodes.values()) {
-            if (this.getOutgoingWires(node.id).length === 0) {
-                sinks.push(node);
+    /** Returns chips with outdegree 0 (zero outgoing connections). */
+    getSinks(): Chip[] {
+        const sinks: Chip[] = [];
+        for (const chip of this.chips.values()) {
+            if (this.getOutgoingWires(chip.id).length === 0) {
+                sinks.push(chip);
             }
         }
         return sinks;
     }
 
-    /** Returns all transitive upstream ancestor nodes feeding into the target node. */
-    getUpstreamNodes(nodeOrId: CircuitNode | string): Set<CircuitNode> {
-        const targetId = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
-        const result = new Set<CircuitNode>();
+    /** Returns all transitive upstream ancestor chips feeding into the target chip. */
+    getUpstreamChips(chipOrId: Chip | string): Set<Chip> {
+        const targetId = typeof chipOrId === "string" ? chipOrId : chipOrId.id;
+        const result = new Set<Chip>();
         const queue: string[] = [targetId];
         const visited = new Set<string>([targetId]);
 
@@ -444,12 +444,12 @@ export class Circuit {
             const currentId = queue.shift()!;
             const inWires = this.getIncomingWires(currentId);
             for (let i = 0; i < inWires.length; i++) {
-                const upId = inWires[i].outNodeId;
+                const upId = inWires[i].outChipId;
                 if (!visited.has(upId)) {
                     visited.add(upId);
-                    const upNode = this.nodes.get(upId);
-                    if (upNode) {
-                        result.add(upNode);
+                    const upChip = this.chips.get(upId);
+                    if (upChip) {
+                        result.add(upChip);
                         queue.push(upId);
                     }
                 }
@@ -458,10 +458,10 @@ export class Circuit {
         return result;
     }
 
-    /** Returns all transitive downstream descendant nodes fed by the target node. */
-    getDownstreamNodes(nodeOrId: CircuitNode | string): Set<CircuitNode> {
-        const targetId = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
-        const result = new Set<CircuitNode>();
+    /** Returns all transitive downstream descendant chips fed by the target chip. */
+    getDownstreamChips(chipOrId: Chip | string): Set<Chip> {
+        const targetId = typeof chipOrId === "string" ? chipOrId : chipOrId.id;
+        const result = new Set<Chip>();
         const queue: string[] = [targetId];
         const visited = new Set<string>([targetId]);
 
@@ -469,12 +469,12 @@ export class Circuit {
             const currentId = queue.shift()!;
             const outWires = this.getOutgoingWires(currentId);
             for (let i = 0; i < outWires.length; i++) {
-                const downId = outWires[i].inNodeId;
+                const downId = outWires[i].inChipId;
                 if (!visited.has(downId)) {
                     visited.add(downId);
-                    const downNode = this.nodes.get(downId);
-                    if (downNode) {
-                        result.add(downNode);
+                    const downChip = this.chips.get(downId);
+                    if (downChip) {
+                        result.add(downChip);
                         queue.push(downId);
                     }
                 }
@@ -483,41 +483,41 @@ export class Circuit {
         return result;
     }
 
-    /** Returns whether a directed path exists from source node to target node. */
-    isReachable(fromNodeOrId: CircuitNode | string, toNodeOrId: CircuitNode | string): boolean {
-        const targetId = typeof toNodeOrId === "string" ? toNodeOrId : toNodeOrId.id;
-        const downstream = this.getDownstreamNodes(fromNodeOrId);
-        for (const node of downstream) {
-            if (node.id === targetId) return true;
+    /** Returns whether a directed path exists from source chip to target chip. */
+    isReachable(fromChipOrId: Chip | string, toChipOrId: Chip | string): boolean {
+        const targetId = typeof toChipOrId === "string" ? toChipOrId : toChipOrId.id;
+        const downstream = this.getDownstreamChips(fromChipOrId);
+        for (const chip of downstream) {
+            if (chip.id === targetId) return true;
         }
         return false;
     }
 
     /**
-     * Dead code elimination: prunes nodes that do not reach target nodes.
-     * When targetNodeIds is omitted, preserves all nodes reaching circuit sinks.
+     * Dead code elimination: prunes chips that do not reach target chips.
+     * When targetChipIds is omitted, preserves all chips reaching circuit sinks.
      */
-    pruneUnreachable(targetNodeIds?: string[]): this {
+    pruneUnreachable(targetChipIds?: string[]): this {
         const retainIds = new Set<string>();
 
-        const seeds = targetNodeIds !== undefined
-            ? targetNodeIds
-            : this.getSinks().map(n => n.id);
+        const seeds = targetChipIds !== undefined
+            ? targetChipIds
+            : this.getSinks().map(c => c.id);
 
         for (let i = 0; i < seeds.length; i++) {
             const seedId = seeds[i];
-            if (this.nodes.has(seedId)) {
+            if (this.chips.has(seedId)) {
                 retainIds.add(seedId);
-                const upstream = this.getUpstreamNodes(seedId);
+                const upstream = this.getUpstreamChips(seedId);
                 for (const up of upstream) {
                     retainIds.add(up.id);
                 }
             }
         }
 
-        for (const nodeId of Array.from(this.nodes.keys())) {
-            if (!retainIds.has(nodeId)) {
-                this.removeNode(nodeId);
+        for (const chipId of Array.from(this.chips.keys())) {
+            if (!retainIds.has(chipId)) {
+                this.removeChip(chipId);
             }
         }
 
@@ -525,18 +525,18 @@ export class Circuit {
     }
 
     /**
-     * Extracts an isolated subcircuit containing only the specified target nodes,
+     * Extracts an isolated subcircuit containing only the specified target chips,
      * their transitive upstream dependencies, and internal interconnecting wires.
      */
-    extractSubgraph(targetNodeIds: string[], options: CircuitOptions = {}): Circuit {
+    extractSubgraph(targetChipIds: string[], options: CircuitOptions = {}): Circuit {
         const sub = new Circuit({ label: options.label ?? `${this.label}_subgraph` });
         const retainIds = new Set<string>();
 
-        for (let i = 0; i < targetNodeIds.length; i++) {
-            const seedId = targetNodeIds[i];
-            if (this.nodes.has(seedId)) {
+        for (let i = 0; i < targetChipIds.length; i++) {
+            const seedId = targetChipIds[i];
+            if (this.chips.has(seedId)) {
                 retainIds.add(seedId);
-                const upstream = this.getUpstreamNodes(seedId);
+                const upstream = this.getUpstreamChips(seedId);
                 for (const up of upstream) {
                     retainIds.add(up.id);
                 }
@@ -544,18 +544,18 @@ export class Circuit {
         }
 
         for (const id of retainIds) {
-            const node = this.nodes.get(id);
-            if (node) {
-                const nodeCopy = (typeof (node as any).clone === "function")
-                    ? (node as any).clone(node.id)
-                    : new NodeProxy(node.id, node);
-                sub.addNode(nodeCopy);
+            const chip = this.chips.get(id);
+            if (chip) {
+                const chipCopy = (typeof (chip as any).clone === "function")
+                    ? (chip as any).clone(chip.id)
+                    : new ChipProxy(chip.id, chip);
+                sub.addChip(chipCopy);
             }
         }
 
         for (const wire of this._inWires.values()) {
-            if (retainIds.has(wire.outNodeId) && retainIds.has(wire.inNodeId)) {
-                sub.connect(wire.outNodeId, wire.outSocket, wire.inNodeId, wire.inSocket);
+            if (retainIds.has(wire.outChipId) && retainIds.has(wire.inChipId)) {
+                sub.connect(wire.outChipId, wire.outSocket, wire.inChipId, wire.inSocket);
             }
         }
 
@@ -563,39 +563,39 @@ export class Circuit {
     }
 
     /**
-     * Inlines a composite subcircuit node directly into this graph,
-     * expanding its inner nodes and rerouting external wires.
+     * Inlines a composite subcircuit chip directly into this graph,
+     * expanding its inner chips and rerouting external wires.
      */
-    flatten(nodeOrId: CircuitNode | string, prefix?: string): this {
-        const id = typeof nodeOrId === "string" ? nodeOrId : nodeOrId.id;
-        const node = this.getNode(id);
-        if (!node) {
-            throw new Error(`[Circuit] Node "${id}" not found in circuit.`);
+    flatten(chipOrId: Chip | string, prefix?: string): this {
+        const id = typeof chipOrId === "string" ? chipOrId : chipOrId.id;
+        const chip = this.getChip(id);
+        if (!chip) {
+            throw new Error(`[Circuit] Chip "${id}" not found in circuit.`);
         }
 
-        const composite = node as any;
+        const composite = chip as any;
         if (!composite.innerCircuit || !composite.inputMappings || !composite.outputMappings) {
-            throw new Error(`[Circuit] Node "${id}" is not a composite subcircuit node.`);
+            throw new Error(`[Circuit] Chip "${id}" is not a composite subcircuit chip.`);
         }
 
         const innerCircuit = composite.innerCircuit as Circuit;
         const p = prefix ?? `${id}_`;
 
-        // 1. Inline internal nodes
-        for (const innerNode of innerCircuit.nodes.values()) {
-            const inlinedId = `${p}${innerNode.id}`;
-            const cloned = (typeof (innerNode as any).clone === "function")
-                ? (innerNode as any).clone(inlinedId)
-                : new NodeProxy(inlinedId, innerNode);
-            this.addNode(cloned);
+        // 1. Inline internal chips
+        for (const innerChip of innerCircuit.chips.values()) {
+            const inlinedId = `${p}${innerChip.id}`;
+            const cloned = (typeof (innerChip as any).clone === "function")
+                ? (innerChip as any).clone(inlinedId)
+                : new ChipProxy(inlinedId, innerChip);
+            this.addChip(cloned);
         }
 
         // 2. Inline internal wires
         for (const wire of innerCircuit.getWires()) {
             this.connect(
-                `${p}${wire.outNodeId}`,
+                `${p}${wire.outChipId}`,
                 wire.outSocket,
-                `${p}${wire.inNodeId}`,
+                `${p}${wire.inChipId}`,
                 wire.inSocket
             );
         }
@@ -607,9 +607,9 @@ export class Circuit {
             const mapping = composite.inputMappings.get(inWire.inSocket) as InputSocketMapping | undefined;
             if (mapping) {
                 this.connect(
-                    inWire.outNodeId,
+                    inWire.outChipId,
                     inWire.outSocket,
-                    `${p}${mapping.innerNodeId}`,
+                    `${p}${mapping.innerChipId}`,
                     mapping.innerSocket
                 );
             }
@@ -622,49 +622,49 @@ export class Circuit {
             const mapping = composite.outputMappings.get(outWire.outSocket) as OutputSocketMapping | undefined;
             if (mapping) {
                 this.connect(
-                    `${p}${mapping.innerNodeId}`,
+                    `${p}${mapping.innerChipId}`,
                     mapping.innerSocket,
-                    outWire.inNodeId,
+                    outWire.inChipId,
                     outWire.inSocket
                 );
             }
         }
 
         // 5. Remove original composite wrapper
-        this.removeNode(id);
+        this.removeChip(id);
         return this;
     }
 
-    /** Clones this circuit graph with optional custom node factory. */
-    clone(nodeCloner?: (node: CircuitNode) => CircuitNode): Circuit {
-        const cloner = nodeCloner ?? ((n: CircuitNode) => (
-            typeof (n as any).clone === "function"
-                ? (n as any).clone(n.id)
-                : new NodeProxy(n.id, n)
+    /** Clones this circuit graph with optional custom chip factory. */
+    clone(chipCloner?: (chip: Chip) => Chip): Circuit {
+        const cloner = chipCloner ?? ((c: Chip) => (
+            typeof (c as any).clone === "function"
+                ? (c as any).clone(c.id)
+                : new ChipProxy(c.id, c)
         ));
 
         const copy = new Circuit({ label: this.label });
-        for (const node of this.nodes.values()) {
-            copy.addNode(cloner(node));
+        for (const chip of this.chips.values()) {
+            copy.addChip(cloner(chip));
         }
         for (const wire of this.getWires()) {
-            copy.connect(wire.outNodeId, wire.outSocket, wire.inNodeId, wire.inSocket);
+            copy.connect(wire.outChipId, wire.outSocket, wire.inChipId, wire.inSocket);
         }
         return copy;
     }
 
-    /** Merges another circuit graph into this one, optionally applying a prefix to node IDs. */
+    /** Merges another circuit graph into this one, optionally applying a prefix to chip IDs. */
     merge(other: Circuit, prefix = ""): this {
-        for (const node of other.nodes.values()) {
-            const newId = prefix ? `${prefix}${node.id}` : node.id;
-            const nodeCopy = (typeof (node as any).clone === "function")
-                ? (node as any).clone(newId)
-                : new NodeProxy(newId, node);
-            this.addNode(nodeCopy);
+        for (const chip of other.chips.values()) {
+            const newId = prefix ? `${prefix}${chip.id}` : chip.id;
+            const chipCopy = (typeof (chip as any).clone === "function")
+                ? (chip as any).clone(newId)
+                : new ChipProxy(newId, chip);
+            this.addChip(chipCopy);
         }
         for (const wire of other.getWires()) {
-            const outId = prefix ? `${prefix}${wire.outNodeId}` : wire.outNodeId;
-            const inId = prefix ? `${prefix}${wire.inNodeId}` : wire.inNodeId;
+            const outId = prefix ? `${prefix}${wire.outChipId}` : wire.outChipId;
+            const inId = prefix ? `${prefix}${wire.inChipId}` : wire.inChipId;
             this.connect(outId, wire.outSocket, inId, wire.inSocket);
         }
         return this;
@@ -674,36 +674,36 @@ export class Circuit {
     toJSON(): SerializedCircuit {
         return {
             label: this.label,
-            nodes: Array.from(this.nodes.values()).map(node => ({
-                id: node.id,
-                name: node.name,
-                inputs: Array.from(node.inputs.values()).map(s => ({
+            chips: Array.from(this.chips.values()).map(chip => ({
+                id: chip.id,
+                name: chip.name,
+                inputs: Array.from(chip.inputs.values()).map(s => ({
                     name: s.name,
                     direction: s.direction,
                     dataType: s.dataType,
                     required: s.required,
                 })),
-                outputs: Array.from(node.outputs.values()).map(s => ({
+                outputs: Array.from(chip.outputs.values()).map(s => ({
                     name: s.name,
                     direction: s.direction,
                     dataType: s.dataType,
                 })),
-                metadata: Object.keys(node.metadata).length > 0 ? { ...node.metadata } : undefined,
+                metadata: Object.keys(chip.metadata).length > 0 ? { ...chip.metadata } : undefined,
             })),
             wires: this.getWires(),
         };
     }
 
-    /** Reconstructs a Circuit graph from serialized JSON using a node factory. */
-    static fromJSON(json: SerializedCircuit, nodeFactory: NodeFactory): Circuit {
+    /** Reconstructs a Circuit graph from serialized JSON using a chip factory. */
+    static fromJSON(json: SerializedCircuit, chipFactory: ChipFactory): Circuit {
         const circuit = new Circuit({ label: json.label });
-        for (let i = 0; i < json.nodes.length; i++) {
-            const node = nodeFactory(json.nodes[i]);
-            circuit.addNode(node);
+        for (let i = 0; i < json.chips.length; i++) {
+            const chip = chipFactory(json.chips[i]);
+            circuit.addChip(chip);
         }
         for (let i = 0; i < json.wires.length; i++) {
             const w = json.wires[i];
-            circuit.connect(w.outNodeId, w.outSocket, w.inNodeId, w.inSocket);
+            circuit.connect(w.outChipId, w.outSocket, w.inChipId, w.inSocket);
         }
         return circuit;
     }

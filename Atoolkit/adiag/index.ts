@@ -1,6 +1,6 @@
-export { Diag } from "./diag.js";
+export { Bus } from "./bus.js";
 export type {
-    DiagResult,
-    DiagAddArgs,
-    DiagType,
-} from "./diag.js";
+    Result,
+    AddArgs,
+    Type,
+} from "./bus.js";

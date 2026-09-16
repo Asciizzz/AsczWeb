@@ -1,11 +1,11 @@
 import type { Wire } from "./wire.js";
 import type { SocketDirection } from "./socket.js";
-import type { CircuitNode } from "./node.js";
+import type { Chip } from "./chip.js";
 
 export type { Wire };
 
 /**
- * Execution context passed to node.process(inputs, ctx).
+ * Execution context passed to chip.process(inputs, ctx).
  */
 export interface ProcessCtx<TCtx = unknown> {
     /** User context forwarded through execution */
@@ -15,15 +15,15 @@ export interface ProcessCtx<TCtx = unknown> {
 /**
  * Configuration for topological runs.
  */
-export interface RunOptions<TCtx = unknown, TNode = unknown> {
-    /** User context forwarded to node.process(inputs, ctx) */
+export interface RunOptions<TCtx = unknown, TChip = unknown> {
+    /** User context forwarded to chip.process(inputs, ctx) */
     ctx?: TCtx;
-    /** Initial input socket values: { [nodeId]: { [socketName]: value } } */
+    /** Initial input socket values: { [chipId]: { [socketName]: value } } */
     overrides?: Record<string, Record<string, any>>;
-    /** Callback invoked before node execution */
-    onNodeEnter?: (node: TNode, inputs: Record<string, any>) => void;
-    /** Callback invoked after node execution */
-    onNodeLeave?: (node: TNode, outputs: Record<string, any>) => void;
+    /** Callback invoked before chip execution */
+    onChipEnter?: (chip: TChip, inputs: Record<string, any>) => void;
+    /** Callback invoked after chip execution */
+    onChipLeave?: (chip: TChip, outputs: Record<string, any>) => void;
     /** Callback invoked on wire value resolution */
     onWireTransmit?: (wire: Wire, value: any) => void;
 }
@@ -31,19 +31,19 @@ export interface RunOptions<TCtx = unknown, TNode = unknown> {
 /**
  * Result of a circuit execution run.
  */
-export interface RunResult<TNode = unknown> {
-    /** Mapping of node ID to computed output socket records */
+export interface RunResult<TChip = unknown> {
+    /** Mapping of chip ID to computed output socket records */
     outputs: Map<string, Record<string, any>>;
-    /** Nodes executed in topological order */
-    executedNodes: TNode[];
+    /** Chips executed in topological order */
+    executedChips: TChip[];
     /** Caught execution errors */
-    errors: Array<{ nodeId: string; error: unknown }>;
+    errors: Array<{ chipId: string; error: unknown }>;
 }
 
 /**
  * Classification of structural graph validation issue.
  */
-export type CircuitIssueType = "cycle" | "missing_input" | "type_mismatch" | "isolated_node";
+export type CircuitIssueType = "cycle" | "missing_input" | "type_mismatch" | "isolated_chip";
 
 /**
  * Diagnostic descriptor representing a validation defect.
@@ -51,7 +51,7 @@ export type CircuitIssueType = "cycle" | "missing_input" | "type_mismatch" | "is
 export interface CircuitIssue {
     type: CircuitIssueType;
     message: string;
-    nodeId?: string;
+    chipId?: string;
     socketName?: string;
     wire?: Wire;
 }
@@ -75,9 +75,9 @@ export interface SerializedSocket {
 }
 
 /**
- * Serialized representation of a circuit node.
+ * Serialized representation of a circuit chip.
  */
-export interface SerializedNode {
+export interface SerializedChip {
     id: string;
     name: string;
     type?: string;
@@ -91,11 +91,11 @@ export interface SerializedNode {
  */
 export interface SerializedCircuit {
     label: string;
-    nodes: SerializedNode[];
+    chips: SerializedChip[];
     wires: Wire[];
 }
 
 /**
- * Factory callback instantiating a CircuitNode from serialized data.
+ * Factory callback instantiating a Chip from serialized data.
  */
-export type NodeFactory = (serialized: SerializedNode) => CircuitNode;
+export type ChipFactory = (serialized: SerializedChip) => Chip;

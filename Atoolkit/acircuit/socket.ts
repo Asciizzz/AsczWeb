@@ -9,8 +9,8 @@ export interface SocketOptions {
 }
 
 /**
- * Communication endpoint on a CircuitNode.
- * Identifies an input or output endpoint on a node with optional type and requirement tags.
+ * Communication endpoint on a Chip.
+ * Identifies an input or output endpoint on a chip with optional type and requirement tags.
  */
 export class Socket {
     readonly name: string;

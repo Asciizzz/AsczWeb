@@ -1,30 +1,30 @@
-export type DiagType = "ok" | "err" | "warn" | "info" | string;
+export type Type = "ok" | "err" | "warn" | "info" | string;
 
-export interface DiagResult {
-    type: DiagType;
+export interface Result {
+    type: Type;
     code: string;
     raw: string;
     data: unknown;
-    ref?: DiagResult | null; // Causal reference pointer to another diagnostic result
+    ref?: Result | null; // Causal reference pointer to another diagnostic result
 }
 
-export interface DiagAddArgs {
+export interface AddArgs {
     code?: string;
     raw?: string;
     data?: unknown;
-    ref?: DiagResult | null;
+    ref?: Result | null;
 }
 
-// ==================== Diag =====================
+// ==================== Bus =====================
 
-export class Diag {
+export class Bus {
     state: Record<string, unknown> = {}; // shared state for all diag
     readonly maxHistory: number;
 
-    #buffer: (DiagResult | null)[];
+    #buffer: (Result | null)[];
     #head = 0;
     #count = 0;
-    private readonly _listeners = new Map<string, Set<(result: DiagResult) => void>>();
+    private readonly _listeners = new Map<string, Set<(result: Result) => void>>();
 
     static readonly TYPE_OK   = "ok";
     static readonly TYPE_ERR  = "err";
@@ -36,9 +36,9 @@ export class Diag {
         this.#buffer = new Array(maxHistory).fill(null);
     }
 
-    get results(): DiagResult[] {
+    get results(): Result[] {
         if (this.#count === 0) return [];
-        const res: DiagResult[] = new Array(this.#count);
+        const res: Result[] = new Array(this.#count);
         const start = (this.#head - this.#count + this.maxHistory) % this.maxHistory;
         for (let i = 0; i < this.#count; i++) {
             res[i] = this.#buffer[(start + i) % this.maxHistory]!;
@@ -46,7 +46,7 @@ export class Diag {
         return res;
     }
 
-    set results(items: DiagResult[]) {
+    set results(items: Result[]) {
         this.clear();
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
@@ -54,16 +54,16 @@ export class Diag {
         }
     }
 
-    ok(args: DiagAddArgs = {}):   DiagResult { return this.#add(Diag.TYPE_OK,   args); }
-    err(args: DiagAddArgs = {}):  DiagResult { return this.#add(Diag.TYPE_ERR,  args); }
-    warn(args: DiagAddArgs = {}): DiagResult { return this.#add(Diag.TYPE_WARN, args); }
-    info(args: DiagAddArgs = {}): DiagResult { return this.#add(Diag.TYPE_INFO, args); }
+    ok(args: AddArgs = {}):   Result { return this.#add(Bus.TYPE_OK,   args); }
+    err(args: AddArgs = {}):  Result { return this.#add(Bus.TYPE_ERR,  args); }
+    warn(args: AddArgs = {}): Result { return this.#add(Bus.TYPE_WARN, args); }
+    info(args: AddArgs = {}): Result { return this.#add(Bus.TYPE_INFO, args); }
 
     /**
      * Subscribes to diagnostic records of specified category type, or '*' for all records.
      * Returns an unsubscribe function.
      */
-    on(type: DiagType | "*", listener: (result: DiagResult) => void): () => void {
+    on(type: Type | "*", listener: (result: Result) => void): () => void {
         let set = this._listeners.get(type);
         if (!set) {
             set = new Set();
@@ -76,16 +76,16 @@ export class Diag {
         };
     }
 
-    onError(listener: (result: DiagResult) => void): () => void {
-        return this.on(Diag.TYPE_ERR, listener);
+    onError(listener: (result: Result) => void): () => void {
+        return this.on(Bus.TYPE_ERR, listener);
     }
 
-    onWarn(listener: (result: DiagResult) => void): () => void {
-        return this.on(Diag.TYPE_WARN, listener);
+    onWarn(listener: (result: Result) => void): () => void {
+        return this.on(Bus.TYPE_WARN, listener);
     }
 
-    #add(type: DiagType, { code = "", raw = "", data = null, ref = null }: DiagAddArgs = {}): DiagResult {
-        const item: DiagResult = { type, code, raw, data, ref };
+    #add(type: Type, { code = "", raw = "", data = null, ref = null }: AddArgs = {}): Result {
+        const item: Result = { type, code, raw, data, ref };
         this.#buffer[this.#head] = item;
         this.#head = (this.#head + 1) % this.maxHistory;
         if (this.#count < this.maxHistory) {
@@ -110,17 +110,17 @@ export class Diag {
         this.#buffer.fill(null);
     }
 
-    last(): DiagResult | null {
+    last(): Result | null {
         if (this.#count === 0) return null;
         const lastIdx = (this.#head - 1 + this.maxHistory) % this.maxHistory;
         return this.#buffer[lastIdx];
     }
 
-    lastErr(): DiagResult | null {
+    lastErr(): Result | null {
         for (let i = 0; i < this.#count; i++) {
             const idx = (this.#head - 1 - i + this.maxHistory) % this.maxHistory;
             const item = this.#buffer[idx];
-            if (item && item.type === Diag.TYPE_ERR) {
+            if (item && item.type === Bus.TYPE_ERR) {
                 return item;
             }
         }
@@ -131,14 +131,14 @@ export class Diag {
         for (let i = 0; i < this.#count; i++) {
             const idx = (this.#head - 1 - i + this.maxHistory) % this.maxHistory;
             const item = this.#buffer[idx];
-            if (item && item.type !== Diag.TYPE_OK) return false;
+            if (item && item.type !== Bus.TYPE_OK) return false;
         }
         return true;
     }
 
-    private _findType(type: string): DiagResult[] {
+    private _findType(type: string): Result[] {
         if (this.#count === 0) return [];
-        const res: DiagResult[] = [];
+        const res: Result[] = [];
         const start = (this.#head - this.#count + this.maxHistory) % this.maxHistory;
         for (let i = 0; i < this.#count; i++) {
             const item = this.#buffer[(start + i) % this.maxHistory];
@@ -149,51 +149,51 @@ export class Diag {
         return res;
     }
 
-    findOk(): DiagResult[] {
-        return this._findType(Diag.TYPE_OK);
+    findOk(): Result[] {
+        return this._findType(Bus.TYPE_OK);
     }
 
     hasErrs(): boolean {
         return this.lastErr() !== null;
     }
 
-    findErrs(): DiagResult[] {
-        return this._findType(Diag.TYPE_ERR);
+    findErrs(): Result[] {
+        return this._findType(Bus.TYPE_ERR);
     }
 
     hasWarns(): boolean {
         for (let i = 0; i < this.#count; i++) {
             const idx = (this.#head - 1 - i + this.maxHistory) % this.maxHistory;
             const item = this.#buffer[idx];
-            if (item && item.type === Diag.TYPE_WARN) return true;
+            if (item && item.type === Bus.TYPE_WARN) return true;
         }
         return false;
     }
 
-    findWarns(): DiagResult[] {
-        return this._findType(Diag.TYPE_WARN);
+    findWarns(): Result[] {
+        return this._findType(Bus.TYPE_WARN);
     }
 
     hasInfos(): boolean {
         for (let i = 0; i < this.#count; i++) {
             const idx = (this.#head - 1 - i + this.maxHistory) % this.maxHistory;
             const item = this.#buffer[idx];
-            if (item && item.type === Diag.TYPE_INFO) return true;
+            if (item && item.type === Bus.TYPE_INFO) return true;
         }
         return false;
     }
 
-    findInfos(): DiagResult[] {
-        return this._findType(Diag.TYPE_INFO);
+    findInfos(): Result[] {
+        return this._findType(Bus.TYPE_INFO);
     }
 
     /**
      * Extracts the causal reference chain starting from `result` in order of causality.
      */
-    static getCauseChain(result: DiagResult | null | undefined): DiagResult[] {
-        const chain: DiagResult[] = [];
-        let curr: DiagResult | null | undefined = result;
-        const seen = new Set<DiagResult>();
+    static getCauseChain(result: Result | null | undefined): Result[] {
+        const chain: Result[] = [];
+        let curr: Result | null | undefined = result;
+        const seen = new Set<Result>();
 
         while (curr && !seen.has(curr)) {
             seen.add(curr);
@@ -238,21 +238,21 @@ export class Diag {
     /**
      * Formats diagnostic result into human-readable string with causal chain details.
      */
-    static formatResult(result: DiagResult): string {
-        const compiled = Diag.resultToMsg(result);
+    static formatResult(result: Result): string {
+        const compiled = Bus.resultToMsg(result);
         const prefix = `[${result.type.toUpperCase()}]${result.code ? ` (${result.code})` : ""}: `;
         return `${prefix}${compiled || result.raw || "No message"}`;
     }
 
-    static resultToMsg(result: DiagResult): string {
-        return Diag.compileMsg(result.raw, result.data as Record<string, unknown>);
+    static resultToMsg(result: Result): string {
+        return Bus.compileMsg(result.raw, result.data as Record<string, unknown>);
     }
 
     /**
      * Compiles full message including causal chain explanations
      */
-    static resultToChainMsg(result: DiagResult): string {
-        const chain = Diag.getCauseChain(result);
-        return chain.map((r, i) => `${i > 0 ? "  -> " : ""}${Diag.resultToMsg(r) || r.code || r.type}`).join("\n");
+    static resultToChainMsg(result: Result): string {
+        const chain = Bus.getCauseChain(result);
+        return chain.map((r, i) => `${i > 0 ? "  -> " : ""}${Bus.resultToMsg(r) || r.code || r.type}`).join("\n");
     }
 }

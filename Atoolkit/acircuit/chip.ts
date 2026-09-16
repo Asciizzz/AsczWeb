@@ -4,7 +4,7 @@ import type { ProcessCtx } from "./types.js";
 /**
  * Stateless computational unit with 1-to-1 input sockets and 1-to-N output sockets.
  */
-export abstract class CircuitNode {
+export abstract class Chip {
     readonly id: string;
     readonly name: string;
     readonly inputs = new Map<string, Socket>();
@@ -27,7 +27,7 @@ export abstract class CircuitNode {
             socket = socketOrName;
         }
         if (socket.direction !== "input") {
-            throw new Error(`[CircuitNode] Input socket "${socket.name}" must have input direction.`);
+            throw new Error(`[Chip] Input socket "${socket.name}" must have input direction.`);
         }
         this.inputs.set(socket.name, socket);
         return this;
@@ -44,7 +44,7 @@ export abstract class CircuitNode {
             socket = socketOrName;
         }
         if (socket.direction !== "output") {
-            throw new Error(`[CircuitNode] Output socket "${socket.name}" must have output direction.`);
+            throw new Error(`[Chip] Output socket "${socket.name}" must have output direction.`);
         }
         this.outputs.set(socket.name, socket);
         return this;
@@ -67,11 +67,11 @@ export abstract class CircuitNode {
      */
     canConnectInput(
         inSocketName: string,
-        outNode: CircuitNode,
+        outChip: Chip,
         outSocketName: string
     ): boolean {
         const inSocket = this.getInput(inSocketName);
-        const outSocket = outNode.getOutput(outSocketName);
+        const outSocket = outChip.getOutput(outSocketName);
         if (!inSocket || !outSocket) return true;
 
         if (inSocket.dataType !== undefined && outSocket.dataType !== undefined) {
@@ -82,8 +82,8 @@ export abstract class CircuitNode {
     }
 
     /**
-     * Evaluates the node from one execution's resolved input values.
-     * Input and output values belong to the circuit run, not to the node.
+     * Evaluates the chip from one execution's resolved input values.
+     * Input and output values belong to the circuit run, not to the chip.
      */
     abstract process(
         inputs: Record<string, any>,
@@ -92,42 +92,42 @@ export abstract class CircuitNode {
 }
 
 /**
- * Transparent proxy node delegating execution and configuration to a source node.
+ * Transparent proxy chip delegating execution and configuration to a source chip.
  */
-export class NodeProxy extends CircuitNode {
-    readonly sourceNode: CircuitNode;
+export class ChipProxy extends Chip {
+    readonly sourceChip: Chip;
 
-    constructor(id: string, sourceNode: CircuitNode) {
-        super(id, sourceNode.name);
-        this.sourceNode = sourceNode;
-        for (const socket of sourceNode.inputs.values()) {
+    constructor(id: string, sourceChip: Chip) {
+        super(id, sourceChip.name);
+        this.sourceChip = sourceChip;
+        for (const socket of sourceChip.inputs.values()) {
             this.addInput(socket.name, {
                 dataType: socket.dataType,
                 required: socket.required,
             });
         }
-        for (const socket of sourceNode.outputs.values()) {
+        for (const socket of sourceChip.outputs.values()) {
             this.addOutput(socket.name, socket.dataType);
         }
-        Object.assign(this.metadata, sourceNode.metadata);
+        Object.assign(this.metadata, sourceChip.metadata);
     }
 
     override canConnectInput(
         inSocketName: string,
-        outNode: CircuitNode,
+        outChip: Chip,
         outSocketName: string
     ): boolean {
-        return this.sourceNode.canConnectInput(inSocketName, outNode, outSocketName);
+        return this.sourceChip.canConnectInput(inSocketName, outChip, outSocketName);
     }
 
     override process(
         inputs: Record<string, any>,
         ctx?: ProcessCtx<any>
     ): Record<string, any> {
-        return this.sourceNode.process(inputs, ctx);
+        return this.sourceChip.process(inputs, ctx);
     }
 
-    clone(newId: string): NodeProxy {
-        return new NodeProxy(newId, this.sourceNode);
+    clone(newId: string): ChipProxy {
+        return new ChipProxy(newId, this.sourceChip);
     }
 }
