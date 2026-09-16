@@ -1,216 +1,20 @@
-import type { Device } from "./device.js";
+// ================================================================
+//  Awgpu - Level 2: Render Destination Coordinator (Target)
+// ================================================================
 
-/**
- * GPU texture wrapper containing hardware texture, view, and metadata.
- */
-export class Texture {
-    readonly gpuTexture: GPUTexture;
-    readonly gpuView: GPUTextureView;
-    width: number;
-    height: number;
-    depthOrArrayLayers: number;
-    readonly format: GPUTextureFormat;
-    readonly sampleCount: number;
-    readonly usage: GPUTextureUsageFlags;
-    readonly gpuOwned: boolean;
-    readonly label: string;
+import { type Device, resolveDevice } from "./device.js";
+import { Texture, resolveTextureView } from "./memory.js";
 
-    constructor(
-        gpuTexture: GPUTexture,
-        gpuView: GPUTextureView,
-        width: number,
-        height: number,
-        format: GPUTextureFormat,
-        usage: GPUTextureUsageFlags,
-        options: {
-            depthOrArrayLayers?: number;
-            sampleCount?: number;
-            gpuOwned?: boolean;
-            label?: string;
-        } = {}
-    ) {
-        this.gpuTexture = gpuTexture;
-        this.gpuView = gpuView;
-        this.width = width;
-        this.height = height;
-        this.depthOrArrayLayers = options.depthOrArrayLayers ?? 1;
-        this.format = format;
-        this.sampleCount = options.sampleCount ?? 1;
-        this.usage = usage;
-        this.gpuOwned = options.gpuOwned ?? true;
-        this.label = options.label ?? gpuTexture.label ?? "Texture";
-    }
-
-    destroy(): void {
-        if (this.gpuOwned) {
-            this.gpuTexture.destroy();
-        }
-    }
-
-    /**
-     * Creates 2D color or data texture.
-     */
-    static create2D(
-        device: GPUDevice,
-        options: {
-            width: number;
-            height: number;
-            format?: GPUTextureFormat;
-            usage?: GPUTextureUsageFlags;
-            sampleCount?: number;
-            label?: string;
-        }
-    ): Texture {
-        const w = Math.max(1, options.width);
-        const h = Math.max(1, options.height);
-        const format = options.format ?? "rgba8unorm";
-        const usage = options.usage ?? (GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST);
-        const label = options.label ?? "Texture2D";
-
-        const gpuTexture = device.createTexture({
-            label,
-            size: [w, h, 1],
-            format,
-            usage,
-            sampleCount: options.sampleCount ?? 1,
-        });
-        const gpuView = gpuTexture.createView({ label: `${label}_View` });
-        return new Texture(gpuTexture, gpuView, w, h, format, usage, { label, sampleCount: options.sampleCount });
-    }
-
-    /**
-     * Creates 2D depth or depth-stencil texture.
-     */
-    static createDepth(
-        device: GPUDevice,
-        options: {
-            width: number;
-            height: number;
-            format?: GPUTextureFormat;
-            usage?: GPUTextureUsageFlags;
-            label?: string;
-        }
-    ): Texture {
-        const w = Math.max(1, options.width);
-        const h = Math.max(1, options.height);
-        const format = options.format ?? "depth24plus";
-        const usage = options.usage ?? (GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING);
-        const label = options.label ?? "DepthTexture";
-
-        const gpuTexture = device.createTexture({
-            label,
-            size: [w, h, 1],
-            format,
-            usage,
-        });
-        const gpuView = gpuTexture.createView({ label: `${label}_View` });
-        return new Texture(gpuTexture, gpuView, w, h, format, usage, { label });
-    }
-
-    /**
-     * Wraps existing GPUTexture and GPUTextureView.
-     */
-    static fromTexture(
-        gpuTexture: GPUTexture,
-        options: {
-            view?: GPUTextureView;
-            label?: string;
-            gpuOwned?: boolean;
-        } = {}
-    ): Texture {
-        const view = options.view ?? gpuTexture.createView();
-        return new Texture(
-            gpuTexture,
-            view,
-            gpuTexture.width,
-            gpuTexture.height,
-            gpuTexture.format,
-            gpuTexture.usage,
-            {
-                depthOrArrayLayers: gpuTexture.depthOrArrayLayers,
-                sampleCount: gpuTexture.sampleCount,
-                gpuOwned: options.gpuOwned ?? false,
-                label: options.label ?? gpuTexture.label,
-            }
-        );
-    }
-}
-
-/**
- * GPU sampler wrapper supporting filtering and depth comparison.
- */
-export class Sampler {
-    readonly gpuSampler: GPUSampler;
-    readonly label: string;
-
-    constructor(gpuSampler: GPUSampler, label = "Sampler") {
-        this.gpuSampler = gpuSampler;
-        this.label = label;
-    }
-
-    /**
-     * Creates standard trilinear or bilinear filtering sampler.
-     */
-    static createLinear(device: GPUDevice, label = "SamplerLinear"): Sampler {
-        const gpuSampler = device.createSampler({
-            label,
-            magFilter: "linear",
-            minFilter: "linear",
-            mipmapFilter: "linear",
-            addressModeU: "repeat",
-            addressModeV: "repeat",
-        });
-        return new Sampler(gpuSampler, label);
-    }
-
-    /**
-     * Creates point / nearest-neighbor sampler.
-     */
-    static createNearest(device: GPUDevice, label = "SamplerNearest"): Sampler {
-        const gpuSampler = device.createSampler({
-            label,
-            magFilter: "nearest",
-            minFilter: "nearest",
-            mipmapFilter: "nearest",
-            addressModeU: "clamp-to-edge",
-            addressModeV: "clamp-to-edge",
-        });
-        return new Sampler(gpuSampler, label);
-    }
-
-    /**
-     * Creates hardware depth comparison sampler (e.g. for depth tests, shadow mapping, or depth peeling).
-     */
-    static createComparison(
-        device: GPUDevice,
-        options: {
-            compare?: GPUCompareFunction;
-            label?: string;
-        } = {}
-    ): Sampler {
-        const label = options.label ?? "ComparisonSampler";
-        const gpuSampler = device.createSampler({
-            label,
-            compare: options.compare ?? "less",
-            magFilter: "linear",
-            minFilter: "linear",
-            addressModeU: "clamp-to-edge",
-            addressModeV: "clamp-to-edge",
-        });
-        return new Sampler(gpuSampler, label);
-    }
-}
-
-export interface ColorAttachmentConfig {
-    texture: Texture | null; // null indicates swapchain canvas texture view
-    clearColor?: { r: number; g: number; b: number; a: number };
+export interface ColorTargetDesc {
+    target: GPUTextureView | Texture | null; // null indicates swapchain canvas backbuffer
+    clearColor?: GPUColor;
     loadOp?: GPULoadOp;
     storeOp?: GPUStoreOp;
-    resolveTarget?: Texture | null;
+    resolveTarget?: GPUTextureView | Texture | null;
 }
 
-export interface DepthAttachmentConfig {
-    texture: Texture;
+export interface DepthTargetDesc {
+    target: GPUTextureView | Texture;
     depthClearValue?: number;
     depthLoadOp?: GPULoadOp;
     depthStoreOp?: GPUStoreOp;
@@ -220,21 +24,35 @@ export interface DepthAttachmentConfig {
 }
 
 /**
- * Render destination descriptor supporting screen canvas, offscreen color buffers, MRT, and depth-only targets.
+ * Coordinates render destination attachments (swapchain, offscreen MRT, depth-only).
+ * Automatically synchronizes canvas swapchain resizing and caches GPURenderPassDescriptor.
+ * Supports MSAA color resolve directly to canvas swapchain backbuffers.
  */
-export class RenderTarget {
+export class Target {
     readonly label: string;
     readonly isScreen: boolean;
-    gfx?: Device;
+    readonly sampleCount: number;
+    device?: Device;
     width: number;
     height: number;
-    colorAttachments: ColorAttachmentConfig[] = [];
-    depthAttachment?: DepthAttachmentConfig;
 
-    private depthFormat?: GPUTextureFormat;
-    private colorFormat?: GPUTextureFormat;
+    // Color and depth attachment descriptors. Mutate via setColorTarget / setDepthTarget
+    // to guarantee cache invalidation; or call invalidateCache() after direct mutation.
+    colorTargets: ColorTargetDesc[] = [];
+    depthTarget?: DepthTargetDesc;
+
+    colorFormat?: GPUTextureFormat;
+    depthFormat?: GPUTextureFormat;
+
+    // Managed textures created by createOffscreen. Exposed for downstream sampling.
+    readonly colorTextures: Texture[] = [];
+
     private _cachedDescriptor?: GPURenderPassDescriptor;
-    private _dirtyDescriptor = true;
+    private _cachedColorAttachments: GPURenderPassColorAttachment[] = [];
+    private _cachedDepthStencilAttachment?: GPURenderPassDepthStencilAttachment;
+    private _depthTexture?: Texture;
+    private _msaaColorTexture?: Texture;
+    private _colorFormats: GPUTextureFormat[] = [];
 
     constructor(
         label: string,
@@ -242,339 +60,374 @@ export class RenderTarget {
         height: number,
         options: {
             isScreen?: boolean;
-            gfx?: Device;
-            colorAttachments?: ColorAttachmentConfig[];
-            depthAttachment?: DepthAttachmentConfig;
-            depthFormat?: GPUTextureFormat;
+            device?: Device;
+            colorTargets?: ColorTargetDesc[];
+            depthTarget?: DepthTargetDesc;
             colorFormat?: GPUTextureFormat;
+            depthFormat?: GPUTextureFormat;
+            sampleCount?: number;
         } = {}
     ) {
         this.label = label;
         this.width = width;
         this.height = height;
         this.isScreen = options.isScreen ?? false;
-        this.gfx = options.gfx;
-        this.colorAttachments = options.colorAttachments ?? [];
-        this.depthAttachment = options.depthAttachment;
-        this.depthFormat = options.depthFormat;
+        this.sampleCount = options.sampleCount ?? 1;
+        this.device = options.device;
+        this.colorTargets = options.colorTargets ?? [];
+        this.depthTarget = options.depthTarget;
         this.colorFormat = options.colorFormat;
+        this.depthFormat = options.depthFormat;
     }
 
     /**
-     * Factory: Creates render target bound to canvas swapchain backbuffer.
-     * Set depthFormat: null to create a pure color screen target (e.g. for 2D/post-processing).
+     * Invalidates the cached GPURenderPassDescriptor and internal attachment caches.
+     * Call after directly mutating colorTargets or depthTarget to force descriptor rebuild.
      */
+    invalidateCache(): void {
+        this._cachedDescriptor = undefined;
+        this._cachedColorAttachments.length = 0;
+        this._cachedDepthStencilAttachment = undefined;
+    }
+
     /**
-     * Factory: Creates render target bound to canvas swapchain backbuffer.
-     * Set depthFormat: null to create a pure color screen target (e.g. for 2D/post-processing).
+     * Updates color attachment at index and invalidates descriptor cache.
+     */
+    setColorTarget(index: number, desc: ColorTargetDesc): void {
+        this.colorTargets[index] = desc;
+        this.invalidateCache();
+    }
+
+    /**
+     * Updates depth attachment and invalidates descriptor cache.
+     */
+    setDepthTarget(desc: DepthTargetDesc | undefined): void {
+        this.depthTarget = desc;
+        this.invalidateCache();
+    }
+
+    /**
+     * Factory: Creates render target bound to canvas presentation swapchain.
+     * Supports multisample anti-aliasing (MSAA) with automatic swapchain resolve target.
+     * Pass depthFormat: null to create pure color pass omitting depth buffers.
      */
     static createScreen(
-        gfx: Device,
+        device: Device,
         options: {
             depthFormat?: GPUTextureFormat | null;
-            clearColor?: { r: number; g: number; b: number; a: number };
+            clearColor?: GPUColor;
+            sampleCount?: number;
             label?: string;
         } = {}
-    ): RenderTarget {
-        const device = gfx.device;
-        const canvas = gfx.canvas!;
-        const w = Math.max(1, canvas.width);
-        const h = Math.max(1, canvas.height);
+    ): Target {
+        const canvas = device.canvas;
+        const w = Math.max(1, canvas ? canvas.width : 1);
+        const h = Math.max(1, canvas ? canvas.height : 1);
         const hasDepth = options.depthFormat !== null;
         const depthFormat = hasDepth ? (options.depthFormat ?? "depth24plus") : undefined;
         const clearColor = options.clearColor ?? { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
         const label = options.label ?? "ScreenTarget";
+        const sampleCount = options.sampleCount ?? 1;
 
-        let depthAttachment: DepthAttachmentConfig | undefined;
+        let msaaColorTex: Texture | undefined;
+        let colorDesc: ColorTargetDesc;
+
+        if (sampleCount > 1) {
+            msaaColorTex = Texture.create2D(device, {
+                width: w,
+                height: h,
+                format: device.format,
+                sampleCount,
+                label: `${label}_MSAAColor`,
+            });
+            colorDesc = {
+                target: msaaColorTex,
+                resolveTarget: null,
+                clearColor,
+                loadOp: "clear",
+                storeOp: "discard",
+            };
+        } else {
+            colorDesc = {
+                target: null,
+                clearColor,
+                loadOp: "clear",
+                storeOp: "store",
+            };
+        }
+
+        let depthTarget: DepthTargetDesc | undefined;
+        let depthTex: Texture | undefined;
+
         if (depthFormat) {
-            const depthTex = Texture.createDepth(device, {
+            depthTex = Texture.createDepth(device, {
                 width: w,
                 height: h,
                 format: depthFormat,
+                sampleCount,
                 label: `${label}_Depth`,
             });
-            depthAttachment = {
-                texture: depthTex,
+            depthTarget = {
+                target: depthTex,
                 depthClearValue: 1.0,
                 depthLoadOp: "clear",
                 depthStoreOp: "store",
             };
         }
 
-        return new RenderTarget(label, w, h, {
+        const target = new Target(label, w, h, {
             isScreen: true,
-            gfx,
-            colorAttachments: [
-                {
-                    texture: null,
-                    clearColor,
-                    loadOp: "clear",
-                    storeOp: "store",
-                },
-            ],
-            depthAttachment,
+            device,
+            colorTargets: [colorDesc],
+            depthTarget,
+            colorFormat: device.format,
             depthFormat,
-            colorFormat: gfx.format ?? "bgra8unorm",
+            sampleCount,
         });
+
+        target._depthTexture = depthTex;
+        target._msaaColorTexture = msaaColorTex;
+        return target;
     }
 
     /**
-     * Factory: Creates offscreen color and depth render target (e.g. for HDR, G-buffer, or RTT).
-     * Set depthFormat: null to create a pure color offscreen target.
+     * Factory: Creates offscreen color and optional depth render target (RTT).
+     * Managed color textures are accessible via colorTextures[] for downstream binding
+     * as sampled inputs in subsequent passes.
      */
     static createOffscreen(
-        device: GPUDevice,
-        width: number,
-        height: number,
-        options: {
-            colorFormat?: GPUTextureFormat;
-            depthFormat?: GPUTextureFormat | null;
-            clearColor?: { r: number; g: number; b: number; a: number };
-            label?: string;
-        } = {}
-    ): RenderTarget {
-        const w = Math.max(1, width);
-        const h = Math.max(1, height);
-        const colorFormat = options.colorFormat ?? "rgba8unorm";
-        const hasDepth = options.depthFormat !== null;
-        const depthFormat = hasDepth ? (options.depthFormat ?? "depth24plus") : undefined;
-        const clearColor = options.clearColor ?? { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-        const label = options.label ?? "OffscreenTarget";
-
-        const colorTex = Texture.create2D(device, {
-            width: w,
-            height: h,
-            format: colorFormat,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
-            label: `${label}_Color0`,
-        });
-
-        let depthAttachment: DepthAttachmentConfig | undefined;
-        if (depthFormat) {
-            const depthTex = Texture.createDepth(device, {
-                width: w,
-                height: h,
-                format: depthFormat,
-                label: `${label}_Depth`,
-            });
-            depthAttachment = {
-                texture: depthTex,
-                depthClearValue: 1.0,
-                depthLoadOp: "clear",
-                depthStoreOp: "store",
-            };
-        }
-
-        return new RenderTarget(label, w, h, {
-            isScreen: false,
-            colorAttachments: [
-                {
-                    texture: colorTex,
-                    clearColor,
-                    loadOp: "clear",
-                    storeOp: "store",
-                },
-            ],
-            depthAttachment,
-            depthFormat,
-            colorFormat,
-        });
-    }
-
-    /**
-     * Factory: Creates depth-only render target (e.g. for shadow maps or depth prepasses).
-     */
-    static createDepthOnly(
-        device: GPUDevice,
-        width: number,
-        height: number,
-        options: {
+        device: Device | GPUDevice,
+        desc: {
+            width: number;
+            height: number;
+            colorFormats?: GPUTextureFormat[];
             depthFormat?: GPUTextureFormat;
             label?: string;
-        } = {}
-    ): RenderTarget {
-        const w = Math.max(1, width);
-        const h = Math.max(1, height);
-        const depthFormat = options.depthFormat ?? "depth32float";
-        const label = options.label ?? "DepthOnlyTarget";
+        }
+    ): Target {
+        const w = Math.max(1, desc.width);
+        const h = Math.max(1, desc.height);
+        const label = desc.label ?? "OffscreenTarget";
+        const formats = desc.colorFormats ?? ["rgba8unorm"];
 
-        const depthTex = Texture.createDepth(device, {
-            width: w,
-            height: h,
-            format: depthFormat,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-            label: `${label}_Depth`,
-        });
+        const textures: Texture[] = [];
+        const colorTargets: ColorTargetDesc[] = new Array(formats.length);
+        for (let i = 0; i < formats.length; i++) {
+            const tex = Texture.create2D(device, {
+                width: w,
+                height: h,
+                format: formats[i],
+                label: `${label}_Color${i}`,
+            });
+            textures.push(tex);
+            colorTargets[i] = {
+                target: tex,
+                clearColor: { r: 0, g: 0, b: 0, a: 1 },
+                loadOp: "clear",
+                storeOp: "store",
+            };
+        }
 
-        return new RenderTarget(label, w, h, {
-            isScreen: false,
-            colorAttachments: [], // No color attachments in depth-only mode
-            depthAttachment: {
-                texture: depthTex,
+        let depthTarget: DepthTargetDesc | undefined;
+        let depthTex: Texture | undefined;
+        if (desc.depthFormat) {
+            depthTex = Texture.createDepth(device, {
+                width: w,
+                height: h,
+                format: desc.depthFormat,
+                label: `${label}_Depth`,
+            });
+            depthTarget = {
+                target: depthTex,
                 depthClearValue: 1.0,
                 depthLoadOp: "clear",
                 depthStoreOp: "store",
-            },
-            depthFormat,
+            };
+        }
+
+        const target = new Target(label, w, h, {
+            isScreen: false,
+            colorTargets,
+            depthTarget,
+            colorFormat: formats[0],
+            depthFormat: desc.depthFormat,
         });
+
+        target._depthTexture = depthTex;
+
+        // Populate managed texture list and format record for resize support.
+        for (const tex of textures) {
+            target.colorTextures.push(tex);
+        }
+        target._colorFormats = formats.slice();
+
+        return target;
     }
 
     /**
-     * Resizes internal textures when target dimensions change.
+     * Synchronizes attachments and returns cached GPURenderPassDescriptor.
+     * Mutates pre-allocated attachment objects in-place to ensure zero heap allocations in hot paths.
      */
-    resize(device: GPUDevice, width: number, height: number): void {
-        const w = Math.max(1, width);
-        const h = Math.max(1, height);
-        if (this.width === w && this.height === h) return;
-
-        this.width = w;
-        this.height = h;
-
-        // Reallocate depth texture
-        if (this.depthAttachment && this.depthFormat) {
-            this.depthAttachment.texture.destroy();
-            this.depthAttachment.texture = Texture.createDepth(device, {
-                width: w,
-                height: h,
-                format: this.depthFormat,
-                label: `${this.label}_Depth`,
-            });
-        }
-
-        // Reallocate offscreen color textures
-        if (!this.isScreen && this.colorFormat) {
-            for (let i = 0; i < this.colorAttachments.length; i++) {
-                const ca = this.colorAttachments[i];
-                if (ca.texture) {
-                    ca.texture.destroy();
-                    ca.texture = Texture.create2D(device, {
-                        width: w,
-                        height: h,
-                        format: this.colorFormat,
-                        label: `${this.label}_Color${i}`,
-                    });
-                }
-            }
-        }
-        this._dirtyDescriptor = true;
-    }
-
-
-    /**
-     * Marks cached GPURenderPassDescriptor dirty, forcing rebuild on next pass.
-     */
-    invalidateDescriptor(): void {
-        this._dirtyDescriptor = true;
-    }
-
-    /**
-     * Builds GPURenderPassDescriptor for command recording in active frame.
-     * Caches descriptor structure to eliminate per-frame object allocation.
-     * Supports optional per-pass loadOp and clear overrides for RTT chaining.
-     */
-    buildPassDescriptor(options?: {
-        loadOp?: GPULoadOp;
-        depthLoadOp?: GPULoadOp;
-        clearColor?: { r: number; g: number; b: number; a: number };
-        depthClearValue?: number;
-    }): GPURenderPassDescriptor {
-        // Automatically synchronize screen target dimensions when canvas resizes
-        if (this.isScreen && this.gfx?.canvas) {
-            const cw = Math.max(1, this.gfx.canvas.width);
-            const ch = Math.max(1, this.gfx.canvas.height);
-            if (cw !== this.width || ch !== this.height) {
-                this.resize(this.gfx.device, cw, ch);
+    getDescriptor(): GPURenderPassDescriptor {
+        if (this.isScreen && this.device && this.device.canvas) {
+            const cw = this.device.canvas.width;
+            const ch = this.device.canvas.height;
+            if (this.width !== cw || this.height !== ch) {
+                this.resize(this.device, cw, ch);
             }
         }
 
-        if (this._dirtyDescriptor || !this._cachedDescriptor) {
-            const colorAttachments: GPURenderPassColorAttachment[] = [];
-
-            if (this.isScreen) {
-                const ca = this.colorAttachments[0];
-                colorAttachments.push({
-                    view: null as any,
-                    clearValue: ca?.clearColor ?? { r: 0, g: 0, b: 0, a: 1 },
-                    loadOp: ca?.loadOp ?? "clear",
-                    storeOp: ca?.storeOp ?? "store",
-                });
-            } else {
-                for (const ca of this.colorAttachments) {
-                    if (ca.texture) {
-                        const entry: GPURenderPassColorAttachment = {
-                            view: ca.texture.gpuView,
-                            clearValue: ca.clearColor ?? { r: 0, g: 0, b: 0, a: 1 },
-                            loadOp: ca.loadOp ?? "clear",
-                            storeOp: ca.storeOp ?? "store",
-                        };
-                        if (ca.resolveTarget) {
-                            entry.resolveTarget = ca.resolveTarget.gpuView;
-                        }
-                        colorAttachments.push(entry);
-                    }
-                }
-            }
-
-            let depthStencilAttachment: GPURenderPassDepthStencilAttachment | undefined;
-            if (this.depthAttachment) {
-                depthStencilAttachment = {
-                    view: this.depthAttachment.texture.gpuView,
-                    depthClearValue: this.depthAttachment.depthClearValue ?? 1.0,
-                    depthLoadOp: this.depthAttachment.depthLoadOp ?? "clear",
-                    depthStoreOp: this.depthAttachment.depthStoreOp ?? "store",
+        const colorCount = this.colorTargets.length;
+        if (!this._cachedDescriptor || this._cachedColorAttachments.length !== colorCount) {
+            this._cachedColorAttachments = new Array(colorCount);
+            for (let i = 0; i < colorCount; i++) {
+                this._cachedColorAttachments[i] = {
+                    view: null as unknown as GPUTextureView,
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: "clear",
+                    storeOp: "store",
                 };
             }
-
+            if (this.depthTarget) {
+                this._cachedDepthStencilAttachment = {
+                    view: null as unknown as GPUTextureView,
+                    depthClearValue: 1.0,
+                    depthLoadOp: "clear",
+                    depthStoreOp: "store",
+                };
+            } else {
+                this._cachedDepthStencilAttachment = undefined;
+            }
             this._cachedDescriptor = {
                 label: `${this.label}_PassDescriptor`,
-                colorAttachments,
-                depthStencilAttachment,
+                colorAttachments: this._cachedColorAttachments,
+                depthStencilAttachment: this._cachedDepthStencilAttachment,
             };
-            this._dirtyDescriptor = false;
         }
 
-        const desc = this._cachedDescriptor;
-        const overrideLoadOp = options?.loadOp;
-        const overrideClearColor = options?.clearColor;
+        for (let i = 0; i < colorCount; i++) {
+            const cfg = this.colorTargets[i];
+            const att = this._cachedColorAttachments[i];
 
-        const cas = desc.colorAttachments as GPURenderPassColorAttachment[];
-        if (this.isScreen) {
-            const canvasView = this.gfx!.canvasContext!.getCurrentTexture().createView();
-            const ca = cas[0];
-            const def = this.colorAttachments[0];
-            ca.view = canvasView;
-            ca.clearValue = overrideClearColor ?? def?.clearColor ?? { r: 0, g: 0, b: 0, a: 1 };
-            ca.loadOp = overrideLoadOp ?? def?.loadOp ?? "clear";
-        } else {
+            if (cfg.target === null) {
+                if (!this.device || !this.device.context) {
+                    throw new Error("Cannot render to swapchain: Device canvas context is unconfigured.");
+                }
+                att.view = this.device.context.getCurrentTexture().createView();
+            } else {
+                att.view = resolveTextureView(cfg.target);
+            }
 
-            for (let i = 0; i < cas.length; i++) {
-                const def = this.colorAttachments[i];
-                if (overrideClearColor) cas[i].clearValue = overrideClearColor;
-                else if (def?.clearColor) cas[i].clearValue = def.clearColor;
-                if (overrideLoadOp) cas[i].loadOp = overrideLoadOp;
-                else if (def?.loadOp) cas[i].loadOp = def.loadOp;
+            att.clearValue = cfg.clearColor ?? { r: 0, g: 0, b: 0, a: 1 };
+            att.loadOp = cfg.loadOp ?? "clear";
+            att.storeOp = cfg.storeOp ?? "store";
+
+            if (cfg.resolveTarget === null) {
+                if (!this.device || !this.device.context) {
+                    throw new Error("Cannot resolve to swapchain: Device canvas context is unconfigured.");
+                }
+                att.resolveTarget = this.device.context.getCurrentTexture().createView();
+            } else if (cfg.resolveTarget !== undefined) {
+                att.resolveTarget = resolveTextureView(cfg.resolveTarget);
+            } else {
+                att.resolveTarget = undefined;
             }
         }
 
-        if (desc.depthStencilAttachment && this.depthAttachment) {
-            desc.depthStencilAttachment.depthLoadOp = options?.depthLoadOp ?? this.depthAttachment.depthLoadOp ?? "clear";
-            desc.depthStencilAttachment.depthClearValue = options?.depthClearValue ?? this.depthAttachment.depthClearValue ?? 1.0;
+        if (this.depthTarget) {
+            if (!this._cachedDepthStencilAttachment) {
+                this._cachedDepthStencilAttachment = {
+                    view: null as unknown as GPUTextureView,
+                    depthClearValue: 1.0,
+                    depthLoadOp: "clear",
+                    depthStoreOp: "store",
+                };
+                this._cachedDescriptor.depthStencilAttachment = this._cachedDepthStencilAttachment;
+            }
+            const ds = this._cachedDepthStencilAttachment;
+            ds.view = resolveTextureView(this.depthTarget.target);
+            ds.depthClearValue = this.depthTarget.depthClearValue ?? 1.0;
+            ds.depthLoadOp = this.depthTarget.depthLoadOp ?? "clear";
+            ds.depthStoreOp = this.depthTarget.depthStoreOp ?? "store";
+            ds.stencilClearValue = this.depthTarget.stencilClearValue;
+            ds.stencilLoadOp = this.depthTarget.stencilLoadOp;
+            ds.stencilStoreOp = this.depthTarget.stencilStoreOp;
+        } else if (this._cachedDescriptor.depthStencilAttachment) {
+            this._cachedDescriptor.depthStencilAttachment = undefined;
+            this._cachedDepthStencilAttachment = undefined;
         }
 
-        return desc;
+        return this._cachedDescriptor;
     }
 
+    /**
+     * Resizes internal attachment textures when dimensions change.
+     * Handles both screen depth/MSAA buffers and offscreen color + depth textures.
+     */
+    resize(device: Device | GPUDevice, width: number, height: number): void {
+        this.width = Math.max(1, width);
+        this.height = Math.max(1, height);
 
-    destroy(): void {
-        if (this.depthAttachment) {
-            this.depthAttachment.texture.destroy();
-        }
-        for (const ca of this.colorAttachments) {
-            if (ca.texture) {
-                ca.texture.destroy();
+        if (this.isScreen) {
+            if (this.sampleCount > 1) {
+                if (this._msaaColorTexture) {
+                    this._msaaColorTexture.destroy();
+                }
+                this._msaaColorTexture = Texture.create2D(device, {
+                    width: this.width,
+                    height: this.height,
+                    format: this.colorFormat ?? "rgba8unorm",
+                    sampleCount: this.sampleCount,
+                    label: `${this.label}_MSAAColor`,
+                });
+                this.colorTargets[0] = { ...this.colorTargets[0], target: this._msaaColorTexture };
+            }
+
+            if (this.depthFormat) {
+                if (this._depthTexture) {
+                    this._depthTexture.destroy();
+                }
+                this._depthTexture = Texture.createDepth(device, {
+                    width: this.width,
+                    height: this.height,
+                    format: this.depthFormat,
+                    sampleCount: this.sampleCount,
+                    label: `${this.label}_Depth`,
+                });
+                if (this.depthTarget) {
+                    this.depthTarget.target = this._depthTexture;
+                }
+            }
+        } else if (!this.isScreen) {
+            // Offscreen target: reallocate all managed color textures.
+            for (let i = 0; i < this.colorTextures.length; i++) {
+                this.colorTextures[i].destroy();
+                const tex = Texture.create2D(device, {
+                    width: this.width,
+                    height: this.height,
+                    format: this._colorFormats[i] ?? "rgba8unorm",
+                    label: `${this.label}_Color${i}`,
+                });
+                this.colorTextures[i] = tex;
+                this.colorTargets[i] = { ...this.colorTargets[i], target: tex };
+            }
+            // Reallocate depth texture for offscreen targets.
+            if (this.depthFormat && this.depthTarget) {
+                if (this._depthTexture) {
+                    this._depthTexture.destroy();
+                } else if (this.depthTarget.target instanceof Texture) {
+                    this.depthTarget.target.destroy();
+                }
+                this._depthTexture = Texture.createDepth(device, {
+                    width: this.width,
+                    height: this.height,
+                    format: this.depthFormat,
+                    label: `${this.label}_Depth`,
+                });
+                this.depthTarget.target = this._depthTexture;
             }
         }
+
+        this.invalidateCache();
     }
 }
-
-

@@ -1,314 +1,894 @@
 # Awgpu
 
-Domain-agnostic WebGPU execution engine managing hardware device presentation, render targets, dynamic buffers, bind group frequency layouts, pipeline compilation, pass recording, and frame sequencing.
+Domain-agnostic, multi-tier WebGPU hardware execution engine managing physical device acquisition, memory allocation, data stream assembly, frequency-slotted resource binding, pipeline compilation, command pass recording, and execution graph scheduling.
+
+Built on progressive disclosure of hardware control, zero-allocation hot paths, and strict compositional modularity.
 
 ---
 
-## Architecture Overview
+## Table of Contents
 
-Awgpu structures GPU workloads across seven layers:
-
-1. `Device`: Adapter negotiation, GPUDevice lifetime, queue submission, and canvas swapchain configuration.
-2. `RenderTarget`: Color and depth attachment descriptors supporting screen swapchains, offscreen MRT, depth-only targets, automatic canvas resize synchronization, and cached pass descriptor generation.
-3. `Texture` & `Sampler`: Hardware texture views and samplers (filtering and depth comparison).
-4. `Buffer` & `BufferPool`: Aligned uniform, storage, vertex, and index buffers with best-fit pool recycling.
-5. `BindSlot` & `BindGroup`: 4-tier frequency slot organization (`Pass = 0`, `Phase = 1`, `Material = 2`, `Instance = 3`) with dynamic offset support and fluent layout builder (`BindGroupLayoutBuilder`).
-6. `RenderPipeline` & `ComputePipeline`: Pipeline compilation with automatic vertex stride/offset calculations, structured diagnostic telemetry, and optional fragment stage for depth-only passes.
-7. `Pass` & `Frame`: Multi-pass command recording with command pooling, redundant state filtering, imperative recording callbacks, and dynamic offset dispatch.
+- [Awgpu](#awgpu)
+  - [Table of Contents](#table-of-contents)
+  - [1. Architecture & Execution Model](#1-architecture--execution-model)
+    - [1.1 Six-Tier Abstraction Hierarchy](#11-six-tier-abstraction-hierarchy)
+    - [1.2 Core Engineering Invariants](#12-core-engineering-invariants)
+    - [1.3 Memory Model & Alignment Rules](#13-memory-model--alignment-rules)
+  - [2. Level 0: Hardware Foundation](#2-level-0-hardware-foundation)
+    - [2.1 Device](#21-device)
+      - [Lifecycle & Operations](#lifecycle--operations)
+        - [`Device.create(config?: DeviceConfig): Promise<Device>`](#devicecreateconfig-deviceconfig-promisedevice)
+        - [`Device.createHeadless(config?: DeviceConfig): Promise<Device>`](#devicecreateheadlessconfig-deviceconfig-promisedevice)
+        - [`createCommandEncoder(label?: string): GPUCommandEncoder`](#createcommandencoderlabel-string-gpucommandencoder)
+        - [`submit(commands: (GPUCommandBuffer | GPUCommandEncoder)[] | GPUCommandBuffer | GPUCommandEncoder): void`](#submitcommands-gpucommandbuffer--gpucommandencoder--gpucommandbuffer--gpucommandencoder-void)
+        - [`destroy(): void`](#destroy-void)
+    - [2.2 Device & Queue Resolution](#22-device--queue-resolution)
+  - [3. Level 1: Managed Memory & Handles](#3-level-1-managed-memory--handles)
+    - [3.1 Buffer & BufferSlice](#31-buffer--bufferslice)
+      - [Factories](#factories)
+      - [Operations](#operations)
+      - [Sub-allocation: BufferSlice](#sub-allocation-bufferslice)
+    - [3.2 BufferPool](#32-bufferpool)
+    - [3.3 Texture & Sampler](#33-texture--sampler)
+      - [Texture Factories](#texture-factories)
+      - [Texture Operations](#texture-operations)
+      - [Sampler](#sampler)
+    - [3.4 Memory Handle Resolution](#34-memory-handle-resolution)
+  - [4. Level 2: Composable Data Structures](#4-level-2-composable-data-structures)
+    - [4.1 StreamSet & Data Streams](#41-streamset--data-streams)
+    - [4.2 SwapBuffer](#42-swapbuffer)
+    - [4.3 Target & Attachment Coordination](#43-target--attachment-coordination)
+  - [5. Level 3: Resource Binding System](#5-level-3-resource-binding-system)
+    - [5.1 SlotFrequency Specification](#51-slotfrequency-specification)
+    - [5.2 BindLayout & BindLayoutBuilder](#52-bindlayout--bindlayoutbuilder)
+    - [5.3 BindTable & Dynamic Offsets](#53-bindtable--dynamic-offsets)
+      - [Binding Resource Normalization](#binding-resource-normalization)
+    - [5.4 BindTable Caching & Deduplication](#54-bindtable-caching--deduplication)
+  - [6. Level 4: Hardware Pipelines](#6-level-4-hardware-pipelines)
+    - [6.1 RasterPipeline](#61-rasterpipeline)
+    - [6.2 ComputePipeline](#62-computepipeline)
+    - [6.3 PipelineCache & Diagnostics](#63-pipelinecache--diagnostics)
+  - [7. Level 5: Command Sequencing & Execution Graph](#7-level-5-command-sequencing--execution-graph)
+    - [7.1 RenderPassNode & ComputePassNode](#71-renderpassnode--computepassnode)
+      - [RenderPassNode](#renderpassnode)
+      - [ComputePassNode](#computepassnode)
+    - [7.2 PassSequence](#72-passsequence)
+    - [7.3 PassGraph](#73-passgraph)
+  - [8. Concrete Architecture Patterns](#8-concrete-architecture-patterns)
+    - [8.1 Pattern A: Multi-Stream Geometry with Dynamic Offsets](#81-pattern-a-multi-stream-geometry-with-dynamic-offsets)
+    - [8.2 Pattern B: Iterative Compute Simulation](#82-pattern-b-iterative-compute-simulation)
+    - [8.3 Pattern C: Dual-Tier Native Hardware Escape Hatch](#83-pattern-c-dual-tier-native-hardware-escape-hatch)
+    - [8.4 Pattern D: Raw WebGPU Handle Interoperability](#84-pattern-d-raw-webgpu-handle-interoperability)
 
 ---
 
-## 1. Device Management
+## 1. Architecture & Execution Model
 
-`Device` manages adapter selection, logical device acquisition, command submission, and presentation swapchains.
+### 1.1 Six-Tier Abstraction Hierarchy
+
+Awgpu organizes WebGPU hardware execution across six compositional tiers. Each tier builds directly on the tier beneath it without encapsulation lock-in:
+
+| Level | Subsystem | Module | Description | Key Exports |
+| :--- | :--- | :--- | :--- | :--- |
+| **5** | Command Scheduling | `sequence.ts`, `graph.ts` | Execution DAG, pass sequencing, hazard synchronization, driver state deduplication | `PassGraph`, `PassSequence`, `RenderPassNode`, `ComputePassNode` |
+| **4** | Hardware Pipelines | `pipeline.ts` | Pipeline layout derivation, shader reflection, pipeline caching | `RasterPipeline`, `ComputePipeline`, `PipelineCache` |
+| **3** | Resource Binding | `binding.ts` | Frequency-slotted resource tables, bind layout builder, bind group caching, dynamic offsets | `BindLayout`, `BindTable`, `BindTableCache`, `SlotFrequency` |
+| **2** | Data Structures | `stream.ts`, `state.ts`, `target.ts` | Stream assembly, ping-pong state containers, swapchain and MRT coordination | `StreamSet`, `SwapBuffer`, `Target` |
+| **1** | Managed Memory | `memory.ts` | Sized buffer/texture allocation, sub-allocated slices, buffer pooling, typed uploads | `Buffer`, `BufferPool`, `Texture`, `Sampler`, `BufferSlice` |
+| **0** | Hardware Foundation | `device.ts` | Physical adapter negotiation, logical device lifecycle, queue submission | `Device`, `resolveDevice`, `resolveQueue` |
+
+### 1.2 Core Engineering Invariants
+
+1. **Strict Domain-Agnosticism**:
+   - Models hardware resources and computation directly: physical buffers, sub-allocated slices, typed stream descriptors, frequency-slotted binding tables, and pass dependency graphs.
+   - Higher-level layers compose these primitives into domain entities.
+
+2. **Namespace Principle & Zero Aliasing**:
+   - Only the library root carries the toolkit prefix (`Awgpu`).
+   - All classes and exported types use clean, unaliased canonical nouns: `Device`, `Buffer`, `Texture`, `Sampler`, `StreamSet`, `SwapBuffer`, `Target`, `BindLayout`, `BindTable`, `RasterPipeline`, `ComputePipeline`, `RenderPassNode`, `ComputePassNode`, `PassSequence`, `PassGraph`.
+   - Aliases (`AwgpuBuffer`, `GpuBuffer`, `ABuffer`) are forbidden.
+
+3. **Progressive Disclosure & Dual-Tier Interoperability**:
+   - Callers choose the abstraction level suited to their workload.
+   - Every interface accepting a higher-level type must accept lower-level and raw WebGPU handles (`GPUDevice`, `GPUBuffer`, `GPUTexture`, `GPUTextureView`, `GPUSampler`, `GPURenderPassEncoder`) without casting or wrapper friction.
+
+4. **Zero-Allocation Hot Path**:
+   - Per-frame animation ticks, simulation steps, and command recording execute with zero heap allocations.
+   - Data updates execute via in-place typed array uploads (`queue.writeBuffer`).
+   - Pass descriptors and command lists are recycled or cached across frames.
+
+5. **Deterministic Hardware Synchronization**:
+   - Multi-pass workloads compile into linear batches submitted as a single `GPUCommandBuffer` to minimize driver overhead.
+   - The execution graph derives hardware pass boundaries to enforce compute-to-compute and compute-to-raster memory hazards.
+
+### 1.3 Memory Model & Alignment Rules
+
+Awgpu enforces WebGPU hardware alignment constraints at allocation time:
+
+| Resource Type | Minimum Size | Byte Alignment | Hardware Specification |
+| :--- | :--- | :--- | :--- |
+| **Uniform Buffer (`UBO`)** | 16 bytes | 16-byte boundary | WebGPU offset alignment (`minUniformBufferOffsetAlignment`) |
+| **Storage Buffer (`SSBO`)** | 4 bytes | 4-byte boundary | WebGPU storage buffer structure alignment rules |
+| **Vertex Buffer (`VBO`)** | 4 bytes | 4-byte boundary | Attribute stride alignment (`arrayStride % 4 == 0`) |
+| **Index Buffer (`IBO`)** | 4 bytes | 4-byte boundary | `uint16` (2-byte) or `uint32` (4-byte) stream boundary |
+| **Buffer Copy Operations** | 4 bytes | 4-byte boundary | `writeBuffer` and `copyBufferToBuffer` byte offsets |
+
+---
+
+## 2. Level 0: Hardware Foundation
+
+Located in `device.ts`. Coordinates adapter negotiation, logical device acquisition, presentation swapchains, and hardware queue submission.
+
+### 2.1 Device
+
+Holds persistent references to native `GPUAdapter`, `GPUDevice`, and `GPUQueue`. Manages presentation swapchains via `GPUCanvasContext` and provides submission entry points. Exposes `native: GPUDevice` (direct alias to `device`), `device: GPUDevice`, `adapter: GPUAdapter`, `queue: GPUQueue`, `canvas: HTMLCanvasElement | null`, `context: GPUCanvasContext | null`, `format: GPUTextureFormat`, `limits: GPUSupportedLimits`, `features: GPUSupportedFeatures`, and `lost: Promise<GPUDeviceLostInfo>`.
 
 ```typescript
-import { Device } from "./device.js";
+constructor(
+    adapter: GPUAdapter,
+    device: GPUDevice,
+    canvas: HTMLCanvasElement | null,
+    context: GPUCanvasContext | null,
+    format: GPUTextureFormat
+)
 
-// Canvas presentation initialization
-const device = await Device.create({
-    canvas: "#renderCanvas",
-    powerPreference: "high-performance",
-    alphaMode: "premultiplied",
-});
-
-// Headless device initialization for compute or offscreen testing
-const headless = await Device.createHeadless({
-    powerPreference: "high-performance",
-});
+get native(): GPUDevice;
+get limits(): GPUSupportedLimits;
+get features(): GPUSupportedFeatures;
+get lost(): Promise<GPUDeviceLostInfo>;
 ```
 
-- `Device.create(options)`: Requests `GPUAdapter` matching `powerPreference` (defaults to `"high-performance"`), acquires `GPUDevice`, resolves target canvas from selector string or element reference, and configures swapchain format via `navigator.gpu.getPreferredCanvasFormat()`.
-- `Device.createHeadless(options)`: Initializes device with `canvas: null` for compute pipelines, test harnesses, or worker threads.
-- `createScreenTarget(options)`: Allocates `RenderTarget` bound to canvas swapchain with matching dimensions and optional depth attachment.
-- `createCommandEncoder(label)`: Instantiates fresh `GPUCommandEncoder`.
-- `submit(commands)`: Accepts single instance or array of `GPUCommandBuffer` or `GPUCommandEncoder`. Automatically calls `finish()` on encoders before submitting to hardware queue.
-- `destroy()`: Unconfigures canvas presentation context and destroys underlying `GPUDevice`.
+#### Lifecycle & Operations
 
----
+##### `Device.create(config?: DeviceConfig): Promise<Device>`
+Acquires `GPUAdapter` and logical `GPUDevice`. Configures canvas presentation context using preferred format (`navigator.gpu.getPreferredCanvasFormat()`).
+- `config.canvas`: Canvas element, query selector string, or null.
+- `config.powerPreference`: `"high-performance"` or `"low-power"`.
+- `config.requiredFeatures`: Array of requested `GPUFeatureName` flags.
+- `config.requiredLimits`: Record of required WebGPU hardware limits.
+- `config.alphaMode`: Canvas compositing mode (`"premultiplied"` or `"opaque"`).
+- `config.onError`: Callback invoked on uncaptured WebGPU validation or out-of-memory errors (`GPUUncapturedErrorEvent`).
+- `config.onDeviceLost`: Callback invoked when hardware device is lost or disconnected (`GPUDeviceLostInfo`).
+- Throws `Error` when WebGPU is unavailable, adapter acquisition fails, or target canvas selector cannot be resolved.
 
-## 2. Textures, Samplers, and Render Targets
+##### `Device.createHeadless(config?: DeviceConfig): Promise<Device>`
+Initializes `Device` with `canvas: null` and `context: null` for compute-only pipelines, web workers, and offscreen test runners.
 
-`Texture` and `Sampler` wrap hardware resources. `RenderTarget` coordinates color and depth attachments for pass recording.
+##### `createCommandEncoder(label?: string): GPUCommandEncoder`
+Allocates native `GPUCommandEncoder` instance tagged with optional diagnostic label.
+
+##### `submit(commands: (GPUCommandBuffer | GPUCommandEncoder)[] | GPUCommandBuffer | GPUCommandEncoder): void`
+Submits single or batched command buffers to the hardware queue. Automatically finalizes uncommitted encoders (`encoder.finish()`) before queue submission.
+
+##### `destroy(): void`
+Unconfigures presentation canvas context and destroys underlying `GPUDevice`.
+
+### 2.2 Device & Queue Resolution
+
+Dual-tier normalization functions resolving raw or wrapped hardware handles:
 
 ```typescript
-import { Texture, Sampler, RenderTarget } from "./target.js";
-
-// Textures
-const colorTex = Texture.create2D(device.device, {
-    width: 1920,
-    height: 1080,
-    format: "rgba8unorm",
-});
-
-const depthTex = Texture.createDepth(device.device, {
-    width: 2048,
-    height: 2048,
-    format: "depth32float",
-});
-
-// Samplers
-const linearSampler = Sampler.createLinear(device.device);
-const shadowSampler = Sampler.createComparison(device.device, { compare: "less" });
-
-// Targets
-const screenTarget = RenderTarget.createScreen(device, {
-    depthFormat: "depth24plus",
-    clearColor: { r: 0.05, g: 0.05, b: 0.08, a: 1.0 },
-});
-
-const shadowTarget = RenderTarget.createDepthOnly(device.device, 2048, 2048, {
-    depthFormat: "depth32float",
-});
-
-const offscreenTarget = RenderTarget.createOffscreen(device.device, 1920, 1080, {
-    colorFormat: "rgba8unorm",
-    depthFormat: "depth24plus",
-});
+export function resolveDevice(deviceOrGpu: Device | GPUDevice): GPUDevice;
+export function resolveQueue(deviceOrGpu: Device | GPUDevice): GPUQueue;
 ```
 
-- `Texture.create2D(device, options)`: Allocates 2D texture and companion view with default `TEXTURE_BINDING | RENDER_ATTACHMENT | COPY_DST` usage.
-- `Texture.createDepth(device, options)`: Allocates depth or depth-stencil texture with `RENDER_ATTACHMENT | TEXTURE_BINDING` usage.
-- `Texture.fromTexture(gpuTexture, options)`: Wraps pre-existing hardware texture without taking destruction ownership unless `gpuOwned: true` is specified.
-- `Sampler.createLinear(device, label)`: Bilinear/trilinear filtering sampler with repeat address mode.
-- `Sampler.createNearest(device, label)`: Point filtering sampler with clamp-to-edge address mode.
-- `Sampler.createComparison(device, options)`: Hardware comparison sampler configured for depth tests and shadow percentage-closer filtering.
-- `RenderTarget.createScreen(gfx, options)`: Binds color attachment 0 to canvas swapchain backbuffer. Automatically updates dimensions and allocates depth texture when requested.
-- `RenderTarget.createDepthOnly(device, width, height, options)`: Allocates pure depth destination omitting color attachments, intended for shadow map generation and depth prepasses.
-- `RenderTarget.createOffscreen(device, width, height, options)`: Allocates offscreen color texture and depth attachment for render-to-texture and post-processing passes.
-- `resize(device, width, height)`: Reallocates internal color and depth textures when target dimensions change, marking cached pass descriptors dirty.
-- `buildPassDescriptor(options)`: Generates `GPURenderPassDescriptor`. Automatically checks canvas dimensions on screen targets, resizing attachments if canvas width/height changed. Caches descriptor structure to eliminate per-frame object allocation, updating only dynamic fields (swapchain views, clear colors, load operations).
-- `invalidateDescriptor()`: Forces cached descriptor rebuild on subsequent pass executions.
+Accepts either toolkit `Device` wrapper or native WebGPU `GPUDevice`, returning unencapsulated native handles.
 
 ---
 
-## 3. Buffers and Memory Pooling
+## 3. Level 1: Managed Memory & Handles
 
-`Buffer` manages aligned GPU storage. `BufferPool` provides dynamic per-frame allocation with best-fit buffer recycling.
+Located in `memory.ts`. Wraps low-level storage allocations, memory alignments, sub-allocations, and typed array updates.
+
+### 3.1 Buffer & BufferSlice
+
+Manages allocation sizing, alignment padding, usage flags, and zero-allocation updates. Exposes `native: GPUBuffer`, `size: number`, `usage: GPUBufferUsageFlags`, and `label: string`.
+
+#### Factories
 
 ```typescript
-import { Buffer, BufferPool } from "./buffer.js";
+static create(device: Device | GPUDevice, desc: {
+    size: number;
+    usage: GPUBufferUsageFlags;
+    data?: BufferSourceData;
+    label?: string;
+}): Buffer;
 
-// Explicit buffers
-const uniformBuf = Buffer.createUniform(device.device, new Float32Array(16));
-const vertexBuf  = Buffer.createVertex(device.device, vertexFloatArray);
-const indexBuf   = Buffer.createIndex(device.device, indexUint16Array);
-const storageBuf = Buffer.createStorage(device.device, 1024, { readOnly: false });
-
-// Buffer updates
-uniformBuf.write(device.device, updatedFloatArray);
-
-// Per-frame buffer pool
-const pool = new BufferPool(GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-const frameUniform = pool.acquire(device.device, 64);
-frameUniform.write(device.device, modelMatrixData);
-
-// Frame boundary reset
-pool.reset();
+static createUniform(device: Device | GPUDevice, sizeOrData: number | BufferSourceData, label?: string): Buffer;
+static createStorage(device: Device | GPUDevice, sizeOrData: number | BufferSourceData, options?: { readOnly?: boolean; label?: string }): Buffer;
+static createVertex(device: Device | GPUDevice, sizeOrData: number | BufferSourceData, label?: string): Buffer;
+static createIndex(device: Device | GPUDevice, sizeOrData: number | BufferSourceData, label?: string): Buffer;
 ```
 
-- `Buffer.createUniform(device, sizeOrData, label)`: Enforces 16-byte minimum sizing and 16-byte alignment required by WebGPU uniform buffer specifications.
-- `Buffer.createVertex(device, dataOrSize, label)`: Allocates vertex buffer aligned to 4 bytes with `VERTEX | COPY_DST` usage.
-- `Buffer.createIndex(device, dataOrSize, label)`: Allocates index buffer aligned to 4 bytes with `INDEX | COPY_DST` usage.
-- `Buffer.createStorage(device, sizeOrData, options)`: Allocates storage buffer aligned to 4 bytes with `STORAGE | COPY_DST` usage.
-- `write(device, data, bufferOffset)`: Uploads typed array data into buffer memory via `queue.writeBuffer`.
-- `BufferPool.acquire(device, requiredSize)`: Searches available idle buffers using best-fit matching for smallest capacity satisfying `requiredSize` (aligned to 16 bytes). Reuses existing buffers without driver destruction; allocates new buffer only when no available buffer fits.
-- `BufferPool.release(buffer)`: Returns individual buffer back to available pool ahead of frame reset.
-- `BufferPool.reset()`: Moves all active buffers from in-use pool back into available pool for subsequent frame recycling without deallocating memory.
-- `totalBuffers` / `inUseCount`: Inspects pool allocation counts for memory profiling.
+- Uniform allocations clamp to 16 bytes minimum and round up to the next 16-byte multiple (`Math.ceil(size / 16) * 16`).
+- Storage buffers include `COPY_DST | COPY_SRC` usage flags to support read-backs, staging copies, and compute mutations.
 
----
+#### Operations
 
-## 4. Bind Group Layouts and Frequency Slots
+- `slice(byteOffset: number, byteLength?: number): BufferSlice`: Returns lightweight sub-allocation descriptor without driver memory reallocation.
+- `write(device: Device | GPUDevice, data: BufferSourceData, bufferOffset = 0): void`: Writes typed data directly into GPU memory using `queue.writeBuffer`.
+- `read(device: Device | GPUDevice, byteOffset?: number, byteLength?: number, reusableStaging?: GPUBuffer): Promise<ArrayBuffer>`: Copies buffer contents to CPU via a `MAP_READ` staging buffer. When `reusableStaging` is provided, skips staging allocation and reuses the provided buffer across calls.
+- `alignUniformOffset(offset: number, alignment = 256): number`: Aligns byte offset to uniform buffer dynamic offset boundary, satisfying hardware `minUniformBufferOffsetAlignment` constraints.
+- `destroy(): void`: Releases native `GPUBuffer`.
 
-`BindSlot` organizes bindings across four standard update frequencies. `BindGroupLayoutBuilder` constructs layouts with dynamic offset support.
+#### Sub-allocation: BufferSlice
 
 ```typescript
-import {
-    BindSlot,
-    BindGroupLayoutBuilder,
-    BindGroup,
-} from "./layout.js";
+export interface BufferSlice {
+    readonly buffer: GPUBuffer | Buffer;
+    readonly byteOffset: number;
+    readonly byteLength: number;
+}
+```
+Allows binding dynamic offsets and sub-ranges without allocating separate hardware buffer handles.
 
-// Pass Layout (Slot 0): Camera view-projection
-const passLayout = new BindGroupLayoutBuilder()
-    .addUniform(0, GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT)
-    .build(device.device, "PassLayout");
+### 3.2 BufferPool
 
-// Material Layout (Slot 2): Surface constants and textures
-const materialLayout = new BindGroupLayoutBuilder()
-    .addUniform(0, GPUShaderStage.FRAGMENT)
-    .addTexture(1, GPUShaderStage.FRAGMENT)
-    .addSampler(2, GPUShaderStage.FRAGMENT)
-    .build(device.device, "MaterialLayout");
+Recycles transient `GPUBuffer` allocations across frames via power-of-two size bucketing:
 
-// Instance Layout (Slot 3): Model transforms with dynamic uniform buffer offsets
-const instanceLayout = new BindGroupLayoutBuilder()
-    .addUniform(0, GPUShaderStage.VERTEX, { hasDynamicOffset: true })
-    .build(device.device, "InstanceLayout");
+```typescript
+export class BufferPool {
+    constructor(device: Device | GPUDevice);
 
-// BindGroup instantiation
-const passBindGroup = BindGroup.create(device.device, passLayout, [
-    { binding: 0, resource: cameraBuffer },
-], { slot: BindSlot.Pass });
+    acquire(size: number, usage: GPUBufferUsageFlags, label?: string): GPUBuffer;
+    release(buffer: GPUBuffer): void;
+    reset(): void;
+    destroy(): void;
+}
 ```
 
-- `BindSlot`: Standardized binding frequency slots:
-  - `Pass = 0`: View-projection matrices, viewport size, global frame constants.
-  - `Phase = 1`: Environment maps, lighting clusters, phase-specific buffers.
-  - `Material = 2`: Diffuse/normal textures, surface properties, samplers.
-  - `Instance = 3`: Per-instance transforms, bone palettes, dynamic model data.
-- `BindGroupLayoutBuilder.addUniform(binding, visibility, options)`: Appends uniform buffer entry. `options.hasDynamicOffset` enables WebGPU dynamic offset binding; `options.minBindingSize` enforces minimum buffer validation size.
-- `BindGroupLayoutBuilder.addStorage(binding, visibility, options)`: Appends storage buffer entry (`read-only-storage` or `storage`). Supports `hasDynamicOffset`.
-- `BindGroupLayoutBuilder.addTexture(binding, visibility, options)`: Appends texture entry (`float`, `unfilterable-float`, `sint`, `uint`, `depth`).
-- `BindGroupLayoutBuilder.addSampler(binding, visibility, options)`: Appends sampler entry (`filtering`, `non-filtering`, or `comparison`).
-- `BindGroup.create(device, layout, entries, options)`: Resolves toolkit resource wrappers (`Buffer`, `Texture`, `Sampler`) into native `GPUBindingResource` descriptors, tracks assigned slot index, and instantiates `GPUBindGroup`.
+- `acquire(size, usage, label?)`: Searches matching bucket for free buffer with capacity >= size. Returns existing handle or allocates new `GPUBuffer`.
+- `release(buffer)`: Returns buffer to free bucket for reuse.
+- `reset()`: Recycles all acquired buffers back into available pool for subsequent frame iterations without deallocation.
+- `destroy()`: Destroys all pooled `GPUBuffer` instances.
 
----
+### 3.3 Texture & Sampler
 
-## 5. Pipeline Creation and Diagnostics
+Manages hardware textures, format metadata, dimensions, usage flags, and primary views. Exposes `native: GPUTexture`, `view: GPUTextureView`, `width: number`, `height: number`, `depthOrLayers: number`, `format: GPUTextureFormat`, `usage: GPUTextureUsageFlags`, and `label: string`.
 
-`createVertexLayout` derives vertex strides and offsets automatically. `RenderPipeline` and `ComputePipeline` compile shader modules with structured diagnostic reporting.
+#### Texture Factories
 
 ```typescript
-import {
-    createVertexLayout,
-    RenderPipeline,
-    ComputePipeline,
-} from "./pipeline.js";
-
-// Automated vertex layout derivation
-const vertexLayout = createVertexLayout([
-    { shaderLocation: 0, format: "float32x3" }, // Position: offset 0
-    { shaderLocation: 1, format: "float32x3" }, // Normal:   offset 12
-    { shaderLocation: 2, format: "float32x2" }, // UV:       offset 24
-]); // arrayStride = 32
-
-// Full render pipeline
-const pipeline = RenderPipeline.create(device.device, {
-    label: "ForwardPipeline",
-    bindGroupLayouts: [passLayout, null, materialLayout, instanceLayout],
-    vertex: {
-        code: shaderCode,
-        entryPoint: "vs_main",
-        buffers: [vertexLayout],
-    },
-    fragment: {
-        code: shaderCode,
-        entryPoint: "fs_main",
-        targets: [{ format: device.format }],
-    },
-    depthStencil: {
-        format: "depth24plus",
-        depthWriteEnabled: true,
-        depthCompare: "less",
-    },
-    diag: diagBus, // Optional Diag instance from adiag receiving structured compilation records
-});
-
-// Depth-only pipeline (omits fragment stage)
-const shadowPipeline = RenderPipeline.create(device.device, {
-    label: "ShadowPipeline",
-    bindGroupLayouts: [passLayout, null, null, instanceLayout],
-    vertex: {
-        code: shadowShaderCode,
-        buffers: [vertexLayout],
-    },
-    depthStencil: {
-        format: "depth32float",
-        depthWriteEnabled: true,
-        depthCompare: "less",
-    },
-});
-
-// Compute pipeline
-const computePipeline = ComputePipeline.create(device.device, {
-    label: "ParticleComputePipeline",
-    code: computeShaderCode,
-    bindGroupLayouts: [computeBindGroupLayout],
-});
+static create(device: Device | GPUDevice, desc: GPUTextureDescriptor): Texture;
+static create2D(device: Device | GPUDevice, options: { width: number; height: number; format?: GPUTextureFormat; usage?: GPUTextureUsageFlags; sampleCount?: number; label?: string }): Texture;
+static create3D(device: Device | GPUDevice, options: { width: number; height: number; depth: number; format?: GPUTextureFormat; usage?: GPUTextureUsageFlags; label?: string }): Texture;
+static createDepth(device: Device | GPUDevice, options: { width: number; height: number; format?: GPUTextureFormat; usage?: GPUTextureUsageFlags; stencil?: boolean; sampleCount?: number; label?: string }): Texture;
+static createCube(device: Device | GPUDevice, options: { size: number; format?: GPUTextureFormat; usage?: GPUTextureUsageFlags; mipLevelCount?: number; label?: string }): Texture;
+static fromNative(gpuTexture: GPUTexture, view?: GPUTextureView, label?: string): Texture;
 ```
 
-- `createVertexLayout(attributes, stepMode)`: Computes cumulative byte offsets and aligns `arrayStride` to 4-byte boundaries automatically from format strings.
-- `RenderPipeline.create(device, descriptor)`: Compiles vertex shader and optional fragment shader modules. Fills omitted intermediate bind group layout slots with empty layouts, preventing layout index misalignment.
-- Depth-only execution: Omitting `descriptor.fragment` instantiates a pure depth pipeline (for shadow mapping or occlusion prepasses) without fragment shader overhead.
-- Structured diagnostics: `descriptor.diag` accepts a `Diag` instance from `adiag`. Shader compilation warnings and errors route into structured records containing stage name, line numbers, character positions, and error text. `descriptor.onShaderMessage` provides direct per-message callback hooks.
-- `ComputePipeline.create(device, options)`: Compiles compute shader module and creates `GPUComputePipeline` with matching diagnostic routing.
+- Every factory automatically generates a primary `GPUTextureView` stored in `.view`, eliminating secondary driver calls during bind table creation.
+- `createDepth` defaults format to `"depth24plus"` or `"depth24plus-stencil8"` when `stencil: true`. Supports MSAA depth buffers via `sampleCount`.
+- `create3D` configures `dimension: "3d"` with `TEXTURE_BINDING | STORAGE_BINDING | COPY_DST` for volumetric data storage and compute storage bindings.
+- `createCube` allocates a 2D texture with 6 array layers and configures `.view` as a `"cube"` dimension view for direct `textureSample` cube sampling in WGSL. Individual face views can be obtained via `createView()` with explicit `baseArrayLayer`.
+
+#### Texture Operations
+
+- `write2D(device: Device | GPUDevice, data: BufferSourceData, width: number, height: number, bytesPerPixel = 4, format?: GPUTextureFormat): void`: Writes 2D image data directly to texture with automated 256-byte aligned `bytesPerRow` row stride calculation and buffer padding.
+- `copyExternalImage(device: Device | GPUDevice, source: GPUImageCopyExternalImageSource, options?: { origin?: GPUOrigin2DStrict; flipY?: boolean }): void`: Uploads external pixel sources (`ImageBitmap`, `HTMLCanvasElement`, `OffscreenCanvas`) via `queue.copyExternalImageToTexture`.
+- `createView(desc?: GPUTextureViewDescriptor): GPUTextureView`: Instantiates additional texture views for specific mip levels, array slices, or cube faces.
+- `destroy(): void`: Releases native `GPUTexture`.
+
+#### Sampler
+
+Wraps native `GPUSampler` instances configured for linear, nearest, or comparison filtering.
+
+- `Sampler.createLinear(device, label?)`: Linear interpolation with repeat address mode.
+- `Sampler.createNearest(device, label?)`: Point filtering with clamp-to-edge address mode.
+- `Sampler.createComparison(device, options?)`: Depth comparison sampler configured with `compare: "less"` for shadow map evaluation.
+
+### 3.4 Memory Handle Resolution
+
+Dual-tier normalization functions resolving raw or wrapped memory handles:
+
+```typescript
+export interface ResolvedBuffer { buffer: GPUBuffer; offset: number; size: number; }
+export function resolveBuffer(source: GPUBuffer | Buffer | BufferSlice, out?: ResolvedBuffer): ResolvedBuffer;
+export function resolveTexture(source: GPUTexture | Texture): GPUTexture;
+export function resolveTextureView(source: GPUTextureView | GPUTexture | Texture): GPUTextureView;
+export function resolveSampler(source: GPUSampler | Sampler): GPUSampler;
+```
+
+`resolveBuffer` accepts an optional mutable `ResolvedBuffer` destination object to eliminate object allocations in hot draw paths.
+`resolveTextureView` caches the default `GPUTextureView` for raw `GPUTexture` inputs in a module-level `WeakMap`. The view is created once per texture object, eliminating repeated allocations in hot paths.
 
 ---
 
-## 6. Pass Recording and Frame Sequencing
+## 4. Level 2: Composable Data Structures
 
-`Pass` records draw commands with state filtering and dynamic offsets. `Frame` orchestrates multi-pass command buffer submission.
+Located in `stream.ts`, `state.ts`, and `target.ts`. Domain-agnostic structural compositions of Level 1 resources.
+
+### 4.1 StreamSet & Data Streams
+
+Assembles planar or interleaved vertex and index buffer streams. Manages 1 to N `VertexStream` definitions and an optional `IndexStream`.
 
 ```typescript
-import { Pass, Frame, BindSlot } from "./index.js";
-
-// Shadow depth pass
-const shadowPass = new Pass("ShadowPass", shadowTarget);
-shadowPass.addDraw({
-    pipeline: shadowPipeline,
-    vertexBuffer: meshVbo,
-    indexBuffer: meshIbo,
-    indexCount: 36,
-    bindGroups: [shadowPassBindGroup, null, null, instanceBindGroup],
-    dynamicOffsets: { [BindSlot.Instance]: [0] },
-});
-
-// Main color pass using pooled commands for zero heap allocations
-const mainPass = new Pass("MainPass", screenTarget);
-
-for (let i = 0; i < objectCount; i++) {
-    const draw = mainPass.acquireDraw(); // Recycles pre-allocated command struct
-    draw.pipeline = pipeline;
-    draw.vertexBuffer = meshVbo;
-    draw.indexBuffer = meshIbo;
-    draw.indexCount = 36;
-    draw.bindGroups = [passBindGroup, null, materialBindGroup, sharedDynamicBindGroup];
-    draw.dynamicOffsets = { [BindSlot.Instance]: [i * 256] };
+export interface VertexStream {
+    slot: number;
+    shaderLocation?: number;
+    source: GPUBuffer | Buffer | BufferSlice;
+    format: GPUVertexFormat;
+    offset?: number;
+    stepMode?: GPUVertexStepMode;
 }
 
-// Direct hardware recording bypass
-const postPass = new Pass("PostPass", screenTarget);
-postPass.record((passEncoder) => {
-    passEncoder.setPipeline(postPipeline.gpuPipeline);
-    passEncoder.setBindGroup(0, postBindGroup.gpuBindGroup);
-    passEncoder.draw(3);
-});
+export interface IndexStream {
+    source: GPUBuffer | Buffer | BufferSlice;
+    format: GPUIndexFormat;
+    count: number;
+    offset?: number;
+    firstIndex?: number;
+    baseVertex?: number;
+}
 
-// Sequence and submit frame
-const frame = new Frame();
-frame.addPass(shadowPass);
-frame.addPass(mainPass);
-frame.addPass(postPass);
-frame.execute(device);
+export class StreamSet {
+    readonly streams: VertexStream[] = [];
+    readonly slotStrides = new Map<number, number>();
+    indexStream?: IndexStream;
+    vertexCount?: number;
+    instanceCount = 1;
+    firstVertex = 0;
+    firstInstance = 0;
+
+    addStream(slot: number, source: GPUBuffer | Buffer | BufferSlice, format: GPUVertexFormat, offset?: number, stepMode?: GPUVertexStepMode, shaderLocation?: number): this;
+    setSlotStride(slot: number, stride: number): this;
+    setIndices(source: GPUBuffer | Buffer | BufferSlice, format: GPUIndexFormat, count: number, offset?: number, firstIndex?: number, baseVertex?: number): this;
+    deriveVertexLayouts(): (GPUVertexBufferLayout | null)[];
+}
 ```
 
-- `Pass.addDraw(cmd)`: Enqueues draw command into pass list.
-- `Pass.acquireDraw()`: Returns recycled `DrawCommand` from internal command pool, resetting mutable fields. Reused instances populate `drawCommands` without per-frame object allocation.
-- `Pass.record(recorder)`: Registers custom imperative callback receiving raw `GPURenderPassEncoder`, bypassing command list processing.
-- `Pass.clearDraws()`: Empties `drawCommands` and resets pool index to 0 for subsequent frame reuse.
-- `Pass.execute(encoder, customRecorder?)`: Opens pass using target's cached descriptor. Applies viewport/scissor. When executing queued draws, filters redundant GPU state changes (skips re-binding identical pipelines, vertex buffers, index buffers, and static bind groups). Dispatches dynamic uniform offsets whenever provided.
-- `ComputePass.acquireCompute()` / `record(recorder)`: Recycles compute command objects and supports direct compute pass dispatch.
-- `Frame.addPass(pass)`: Sequences render and compute passes.
-- `Frame.execute(deviceOrGfx, label)`: Allocates single `GPUCommandEncoder`, executes all passes sequentially, finishes command recording, and submits final `GPUCommandBuffer` to device queue.
+`deriveVertexLayouts()` groups registered `VertexStream` records by buffer slot, maps them directly to hardware slot indices (inserting `null` for unused slots), computes cumulative byte offsets per attribute, aligns stream strides to 4-byte boundaries (`Math.ceil(currentOffset / 4) * 4`), or applies explicit slot strides configured via `setSlotStride()`. Output matches `(GPUVertexBufferLayout | null)[]` for pipeline compilation.
+
+**`shaderLocation` vs `slot`**: `slot` is the buffer binding index passed to `setVertexBuffer`. `shaderLocation` is the WGSL `@location` attribute index. For planar layouts (one attribute per buffer), both values are conventionally equal and `shaderLocation` can be omitted. For interleaved layouts (multiple attributes packed into one buffer), each attribute needs a distinct `shaderLocation` and it must be set explicitly. When omitted, `deriveVertexLayouts()` falls back to `slot + i` within the group.
+
+### 4.2 SwapBuffer
+
+Coordinates ping-pong buffers across iterative compute operations and render-to-texture feedback loops. Operates in constant time without driver copies or heap allocations.
+
+```typescript
+export class SwapBuffer<T extends Buffer | Texture | GPUBuffer | GPUTexture> {
+    constructor(initial: T, secondary: T);
+    get read(): T;
+    get write(): T;
+    swap(): void;
+    set(initial: T, secondary: T): void;
+}
+```
+
+Calls to `swap()` exchange internal read and write pointers in O(1) time without issuing GPU memory copy commands.
+
+### 4.3 Target & Attachment Coordination
+
+Coordinates color attachments and depth-stencil attachments for render pass execution. Manages screen swapchain backbuffers, offscreen multi-render-target (MRT) textures, and depth-only targets.
+
+```typescript
+export interface ColorTargetDesc {
+    target: GPUTextureView | Texture | null; // null indicates swapchain backbuffer
+    clearColor?: GPUColor;
+    loadOp?: GPULoadOp;
+    storeOp?: GPUStoreOp;
+    resolveTarget?: GPUTextureView | Texture;
+}
+
+export interface DepthTargetDesc {
+    target: GPUTextureView | Texture;
+    depthClearValue?: number;
+    depthLoadOp?: GPULoadOp;
+    depthStoreOp?: GPUStoreOp;
+    stencilClearValue?: number;
+    stencilLoadOp?: GPULoadOp;
+    stencilStoreOp?: GPUStoreOp;
+}
+
+export class Target {
+    readonly label: string;
+    readonly isScreen: boolean;
+    readonly colorTextures: Texture[];  // managed textures from createOffscreen, empty for screen targets
+
+    colorTargets: ColorTargetDesc[];
+    depthTarget?: DepthTargetDesc;
+
+    static createScreen(device: Device, options?: { depthFormat?: GPUTextureFormat | null; clearColor?: GPUColor; sampleCount?: number; label?: string }): Target;
+    static createOffscreen(device: Device | GPUDevice, desc: { width: number; height: number; colorFormats?: GPUTextureFormat[]; depthFormat?: GPUTextureFormat; sampleCount?: number; label?: string }): Target;
+
+    getDescriptor(): GPURenderPassDescriptor;
+    resize(device: Device | GPUDevice, width: number, height: number): void;
+    invalidateCache(): void;
+    setColorTarget(index: number, desc: ColorTargetDesc): void;
+    setDepthTarget(desc: DepthTargetDesc | undefined): void;
+}
+```
+
+- `getDescriptor()` reuses cached `GPURenderPassDescriptor` instances, updating swapchain backbuffer views and clear colors in-place within pre-allocated attachment structures to eliminate all per-frame heap allocations.
+- `createScreen` supports MSAA anti-aliasing via `sampleCount`. When `sampleCount > 1`, allocates an internal multi-sampled transient color texture and automatically sets swapchain backbuffer as `resolveTarget`.
+- Passing `depthFormat: null` to `Target.createScreen` omits depth buffer allocation for pure-color and post-processing passes.
+- Canvas dimension updates trigger automatic depth texture reallocation on subsequent `getDescriptor()` calls.
+- `createOffscreen` populates `colorTextures[]` with the managed `Texture` objects created for each color attachment. Bind these directly in downstream pass bind tables for RTT read access.
+- `resize()` reallocates all managed color textures for offscreen targets and the depth texture for both screen and offscreen targets. Screen targets only reallocate depth.
+- `setColorTarget()` and `setDepthTarget()` update attachment descriptors and invalidate the cached descriptor in one call. Direct mutation of `colorTargets` or `depthTarget` is permitted but requires a subsequent `invalidateCache()` call.
+
+---
+
+## 5. Level 3: Resource Binding System
+
+Located in `binding.ts`. Replaces manual bind group boilerplate with a standardized frequency-tier architecture.
+
+### 5.1 SlotFrequency Specification
+
+Bindings are organized across four standard update frequencies to filter redundant driver state changes during pass execution:
+
+```typescript
+export enum SlotFrequency {
+    PerFrame = 0,     // Matrices, globals, time, viewport resolution
+    PerPhase = 1,     // Lighting clusters, environment maps, shadow atlases
+    PerBatch = 2,     // Surface constants, data buffers, localized samplers
+    PerInstance = 3,  // Per-draw dynamic transforms, bone palettes
+}
+```
+
+### 5.2 BindLayout & BindLayoutBuilder
+
+Fluent builder constructing `GPUBindGroupLayout` descriptors:
+
+```typescript
+export class BindLayoutBuilder {
+    addUniform(binding: number, visibility?: GPUShaderStageFlags, options?: { hasDynamicOffset?: boolean; minBindingSize?: number }): this;
+    addStorage(binding: number, visibility?: GPUShaderStageFlags, options?: { readOnly?: boolean; hasDynamicOffset?: boolean; minBindingSize?: number }): this;
+    addTexture(binding: number, visibility?: GPUShaderStageFlags, options?: { sampleType?: GPUTextureSampleType; viewDimension?: GPUTextureViewDimension; multisampled?: boolean }): this;
+    addStorageTexture(binding: number, format: GPUTextureFormat, visibility?: GPUShaderStageFlags, options?: { access?: GPUStorageTextureAccess; viewDimension?: GPUTextureViewDimension }): this;
+    addSampler(binding: number, visibility?: GPUShaderStageFlags, options?: { comparison?: boolean }): this;
+    build(device: Device | GPUDevice, label?: string): BindLayout;
+}
+```
+
+### 5.3 BindTable & Dynamic Offsets
+
+Wraps native `GPUBindGroup` and normalizes input resources into native `GPUBindingResource` descriptors:
+
+```typescript
+export class BindTable {
+    readonly native: GPUBindGroup;
+    readonly layout: GPUBindGroupLayout;
+    readonly slot: number;
+    readonly label: string;
+
+    static create(
+        device: Device | GPUDevice,
+        layout: GPUBindGroupLayout | BindLayout,
+        entries: BindingEntry[],
+        options?: { slot?: number; label?: string }
+    ): BindTable;
+
+    static getOrCreate(
+        device: Device | GPUDevice,
+        layout: GPUBindGroupLayout | BindLayout,
+        entries: BindingEntry[],
+        options?: { slot?: number; label?: string }
+    ): BindTable;
+
+    static clearCache(): void;
+}
+```
+
+#### Binding Resource Normalization
+`resolveBindingResource(res)` handles every tier transparently:
+- `BufferSlice` -> `{ buffer: slice.buffer.native, offset: slice.byteOffset, size: slice.byteLength }`
+- `Buffer` -> `{ buffer: buffer.native }`
+- `Texture` -> `texture.view`
+- `Sampler` -> `sampler.native`
+- Native handles (`GPUBuffer`, `GPUTextureView`, `GPUSampler`) -> Passed through unchanged.
+
+### 5.4 BindTable Caching & Deduplication
+
+Prevents redundant allocation of identical `GPUBindGroup` instances:
+
+```typescript
+export class BindTableCache {
+    get(key: string): BindTable | undefined;
+    set(key: string, table: BindTable): void;
+    getOrCreate(
+        device: Device | GPUDevice,
+        layout: GPUBindGroupLayout | BindLayout,
+        entries: BindingEntry[],
+        options?: { slot?: number; label?: string }
+    ): BindTable;
+    clear(): void;
+}
+```
+
+- `BindTable.getOrCreate(device, layout, entries, options)`: Normalizes entries and computes deterministic composite hash key based on layout ID and resource handles. Reuses cached `BindTable` if match exists.
+- `BindTable.clearCache()`: Clears default shared bind table cache.
+- `hashBindingEntries(layout, entries)`: Computes deterministic composite key for layout and entry bindings.
+
+---
+
+## 6. Level 4: Hardware Pipelines
+
+Located in `pipeline.ts`. Manages shader modules, automatic layout chaining, and pipeline caching.
+
+### 6.1 RasterPipeline
+
+Compiles vertex and fragment shader modules into `GPURenderPipeline`.
+
+```typescript
+export class RasterPipeline {
+    readonly native: GPURenderPipeline;
+    readonly layout?: GPUPipelineLayout;
+    readonly hasFragmentStage: boolean;
+    readonly label: string;
+
+    static create(device: Device | GPUDevice, desc: RasterPipelineDesc): RasterPipeline;
+    static createAsync(device: Device | GPUDevice, desc: RasterPipelineDesc): Promise<RasterPipeline>;
+}
+```
+
+- `createAsync` compiles the pipeline asynchronously via `device.createRenderPipelineAsync` to prevent main-thread compilation stalls.
+- Providing `desc.streamSet` derives `vertex.buffers` automatically from stream set layouts.
+- Empty layout slots (for example `[passLayout, null, batchLayout]`) are populated with empty `GPUBindGroupLayout` handles to prevent layout index misalignment.
+- Omitting `desc.fragment` compiles a depth-only pipeline for shadow cascades and depth prepasses.
+
+### 6.2 ComputePipeline
+
+Compiles compute shader modules into `GPUComputePipeline`.
+
+```typescript
+export class ComputePipeline {
+    readonly native: GPUComputePipeline;
+    readonly layout?: GPUPipelineLayout;
+    readonly label: string;
+
+    static create(device: Device | GPUDevice, desc: ComputePipelineDesc): ComputePipeline;
+    static createAsync(device: Device | GPUDevice, desc: ComputePipelineDesc): Promise<ComputePipeline>;
+}
+```
+
+- `createAsync` compiles the pipeline asynchronously via `device.createComputePipelineAsync` to prevent main-thread compilation stalls.
+
+### 6.3 PipelineCache & Diagnostics
+
+- **`PipelineCache`**: Prevents redundant driver recompilation of identical pipelines. Supports automated descriptor hashing (`hashRasterDesc`, `hashComputeDesc`) and cached creation (`getOrCreateRaster`, `getOrCreateRasterAsync`, `getOrCreateCompute`, `getOrCreateComputeAsync`). Exposes static shared instance `PipelineCache.default`.
+- **Structured Diagnostics**: `reportShaderMessages` queries `getCompilationInfo()` on shader modules and routes warnings, line numbers, and error messages to diagnostic handlers.
+
+---
+
+## 7. Level 5: Command Sequencing & Execution Graph
+
+Located in `sequence.ts` and `graph.ts`. Coordinates multi-pass command recording, redundant driver state filtering, and memory hazard management.
+
+### 7.1 RenderPassNode & ComputePassNode
+
+Records render and compute commands into target attachments with driver state deduplication. Pre-allocates 8 bind group tracking slots, dynamically growing when slot index exceeds 7.
+
+#### RenderPassNode
+
+Records draw commands into target attachments. Skips re-binding identical pipelines, vertex buffers (tracking both GPUBuffer handle and byte offset), index buffers (tracking buffer handle, index format, and byte offset), and bind tables between successive draws. Tracks dynamic offset application per slot so transitions from dynamic offsets back to base offset re-bind cleanly.
+
+```typescript
+export interface DrawBatch {
+    pipeline: RasterPipeline;
+    streamSet?: StreamSet;
+    bindTables?: (BindTable | GPUBindGroup | null | undefined)[];
+    vertexCount?: number;
+    indexCount?: number;
+    instanceCount?: number;
+    firstVertex?: number;
+    firstInstance?: number;
+    firstIndex?: number;
+    baseVertex?: number;
+    dynamicOffsets?: DynamicOffsetRecord;
+    indirect?: {
+        buffer: GPUBuffer | Buffer;
+        offset?: number;
+    };
+}
+
+export class RenderPassNode {
+    readonly label: string;
+    target: Target;
+    readonly draws: DrawBatch[] = [];
+
+    addDraw(batch: DrawBatch): this;
+    record(recorder: (pass: GPURenderPassEncoder) => void): this;
+    clear(): void;
+    execute(encoder: GPUCommandEncoder): void;
+}
+```
+
+- `DrawBatch.indirect`: Executes indirect draws via `pass.drawIndirect` (unindexed) or `pass.drawIndexedIndirect` (indexed) using arguments read from the specified GPU buffer.
+- `DrawBatch.indexCount`: Overrides index count configured on `streamSet.indexStream`.
+- `DrawBatch.vertexCount`: Resolves draw count for unindexed geometry when `streamSet.vertexCount` is omitted.
+- `record()`: Registers imperative escape hatch accepting raw `GPURenderPassEncoder` commands. Calling `record()` replaces queued `draws` for that execution; the two modes are mutually exclusive within a single pass.
+
+#### ComputePassNode
+
+Sequences compute dispatches with redundant pipeline and bind table deduplication.
+
+```typescript
+export interface ComputeBatch {
+    pipeline: ComputePipeline;
+    workgroups?: [number, number, number];
+    bindTables?: (BindTable | GPUBindGroup | null | undefined)[];
+    dynamicOffsets?: DynamicOffsetRecord;
+    indirect?: {
+        buffer: GPUBuffer | Buffer;
+        offset?: number;
+    };
+}
+
+export class ComputePassNode {
+    readonly label: string;
+    readonly dispatches: ComputeBatch[] = [];
+
+    addDispatch(batch: ComputeBatch): this;
+    record(recorder: (pass: GPUComputePassEncoder) => void): this;
+    clear(): void;
+    execute(encoder: GPUCommandEncoder): void;
+}
+```
+
+- `ComputeBatch.indirect`: Dispatches compute workgroups via `pass.dispatchWorkgroupsIndirect` using arguments read from the specified GPU buffer.
+- `record()`: Registers an imperative escape hatch accepting raw `GPUComputePassEncoder` commands. Calling `record()` replaces queued `dispatches` for that execution; the two modes are mutually exclusive within a single pass.
+
+### 7.2 PassSequence
+
+Linear multi-pass execution coordinator:
+
+```typescript
+export class PassSequence {
+    readonly passes: (RenderPassNode | ComputePassNode)[] = [];
+
+    add(pass: RenderPassNode | ComputePassNode): this;
+    clear(): void;
+    execute(device: Device | GPUDevice, label?: string): void;
+}
+```
+
+Allocates a single `GPUCommandEncoder` per frame, records all passes sequentially, finalizes one `GPUCommandBuffer`, and submits the batch to the hardware queue in one call.
+
+### 7.3 PassGraph
+
+Directed Acyclic Graph (DAG) pass scheduler resolving read/write resource hazards and eliminating dead passes:
+
+```typescript
+export class PassGraph {
+    addRenderPass(target: Target, label?: string): RenderGraphNode;
+    addComputePass(label?: string): ComputeGraphNode;
+    clear(): void;
+    invalidate(): void;
+    compile(optionsOrForce?: boolean | { force?: boolean; cullDeadPasses?: boolean }, cullDeadPasses?: boolean): PassSequence;
+    execute(device: Device | GPUDevice, label?: string, options?: { force?: boolean; cullDeadPasses?: boolean }): void;
+}
+
+export class RenderGraphNode {
+    read(res: GraphResource): this;
+    write(res: GraphResource): this;
+    sideEffect(enabled?: boolean): this;
+    addDraw(batch: DrawBatch): this;
+    record(recorder: (pass: GPURenderPassEncoder) => void): this;
+    readonly node: RenderPassNode;
+    readonly hasSideEffect: boolean;
+}
+
+export class ComputeGraphNode {
+    read(res: GraphResource): this;
+    write(res: GraphResource): this;
+    sideEffect(enabled?: boolean): this;
+    addDispatch(batch: ComputeBatch): this;
+    record(recorder: (pass: GPUComputePassEncoder) => void): this;
+    readonly node: ComputePassNode;
+    readonly hasSideEffect: boolean;
+}
+```
+
+- `compile(optionsOrForce?, cullDeadPasses?)`: Evaluates read/write hazards bidirectionally across pass pairs using Kahn topological sorting (O(V+E)). Performs reverse reachability analysis from side-effect roots (screen targets or nodes tagged `.sideEffect(true)`) to automatically cull dead passes not contributing to final output. Automatically caches compiled `PassSequence` while pass topology remains unchanged, eliminating sort overhead and allocations across per-frame `execute()` invocations.
+- `invalidate()`: Clears cached sequence and forces recompilation on subsequent execution.
+- `RenderGraphNode`: Automatically registers target color and depth output attachments into its write dependency set. Targets outputting to canvas swapchains (`null` target) automatically register as side-effect roots.
+- Pass boundaries between compute writes and subsequent texture reads enforce WebGPU memory synchronization without manual barriers.
+- `addDraw()` and `addDispatch()` forward directly to inner pass node.
+- When circular dependency cycle is detected, `compile()` emits `console.warn` and falls back to declaration order.
+
+---
+
+## 8. Concrete Architecture Patterns
+
+### 8.1 Pattern A: Multi-Stream Geometry with Dynamic Offsets
+
+Demonstrates Level 1 buffers, Level 2 streams, Level 3 dynamic offsets, and Level 5 draw recording:
+
+```typescript
+import {
+    Device,
+    Buffer,
+    StreamSet,
+    BindLayout,
+    BindTable,
+    RasterPipeline,
+    RenderPassNode,
+    Target,
+    SlotFrequency,
+} from "Atoolkit/awgpu_new";
+
+// 1. Initialize Device & Presentation Target
+const gfx = await Device.create({ canvas: "#renderCanvas" });
+const target = Target.createScreen(gfx);
+
+// 2. Level 1: Allocate Dedicated Buffers
+const posBuffer = Buffer.createVertex(gfx, new Float32Array([...]));
+const normalBuffer = Buffer.createVertex(gfx, new Float32Array([...]));
+const indexBuffer = Buffer.createIndex(gfx, new Uint16Array([...]));
+
+// 3. Level 2: Compose into StreamSet (planar: one attribute per buffer slot)
+const streams = new StreamSet()
+    .addStream(0, posBuffer, "float32x3")
+    .addStream(1, normalBuffer, "float32x3")
+    .setIndices(indexBuffer, "uint16", 36);
+
+// 4. Level 3: Dynamic Uniform Buffer Layout
+const instanceLayout = BindLayout.builder()
+    .addUniform(0, GPUShaderStage.VERTEX, { hasDynamicOffset: true })
+    .build(gfx, "InstanceLayout");
+
+const instanceTable = BindTable.create(gfx, instanceLayout, [
+    { binding: 0, resource: dynamicBuffer },
+], { slot: SlotFrequency.PerInstance });
+
+// 5. Level 4: Pipeline Creation
+const pipeline = RasterPipeline.create(gfx, {
+    vertex: { code: shaderCode },
+    fragment: { code: shaderCode, targets: [{ format: gfx.format }] },
+    streamSet: streams,
+    layouts: [null, null, null, instanceLayout],
+});
+
+// 6. Level 5: Queue Draw Calls with Zero Heap Allocations
+const pass = new RenderPassNode(target);
+for (let i = 0; i < objectCount; i++) {
+    pass.addDraw({
+        pipeline,
+        streamSet: streams,
+        bindTables: [null, null, null, instanceTable],
+        dynamicOffsets: { [SlotFrequency.PerInstance]: [i * 256] },
+    });
+}
+```
+
+#### 8.2 Pattern B: Double-Buffered Compute Iteration
+
+Demonstrates Level 2 `SwapBuffer`, Level 3 storage bindings, and Level 5 pass execution:
+
+```typescript
+import {
+    Device,
+    Buffer,
+    SwapBuffer,
+    BindLayout,
+    BindTable,
+    ComputePipeline,
+    ComputePassNode,
+    PassSequence,
+} from "Atoolkit/awgpu_new";
+
+const gfx = await Device.createHeadless();
+
+// 1. Level 2: Ping-Pong Storage Buffers
+const state = new SwapBuffer(
+    Buffer.createStorage(gfx, 65536 * 4),
+    Buffer.createStorage(gfx, 65536 * 4)
+);
+
+// 2. Level 3: Layout & Tables
+const computeLayout = BindLayout.builder()
+    .addStorage(0, GPUShaderStage.COMPUTE, { readOnly: true })
+    .addStorage(1, GPUShaderStage.COMPUTE, { readOnly: false })
+    .build(gfx);
+
+// 3. Level 4: Compute Pipeline
+const computePipeline = ComputePipeline.create(gfx, {
+    code: computeCode,
+    layouts: [computeLayout],
+});
+
+// 4. Level 5: Sequence 20 Iteration Passes
+const sequence = new PassSequence();
+
+for (let iter = 0; iter < 20; iter++) {
+    const table = BindTable.create(gfx, computeLayout, [
+        { binding: 0, resource: state.read },
+        { binding: 1, resource: state.write },
+    ]);
+
+    const node = new ComputePassNode(`Iter_${iter}`);
+    node.addDispatch({
+        pipeline: computePipeline,
+        workgroups: [16, 16, 1],
+        bindTables: [table],
+    });
+
+    sequence.add(node);
+    state.swap();
+}
+
+// Execute all 20 passes in a single hardware submission
+sequence.execute(gfx);
+```
+
+### 8.3 Pattern C: Dual-Tier Native Hardware Escape Hatch
+
+Demonstrates mixing Level 5 batch orchestration with raw WebGPU native encoding in the same pass. `addDraw()` and `record()` are mutually exclusive per pass: use `addDraw()` for batched state-deduplicated draws, or `record()` for full imperative control.
+
+```typescript
+import { Target, RenderPassNode } from "Atoolkit/awgpu_new";
+
+// Batched draws via addDraw():
+const batchPass = new RenderPassNode(screenTarget);
+batchPass.addDraw({
+    pipeline: geometryPipeline,
+    streamSet: geometryStreams,
+    bindTables: [frameTable],
+});
+
+// Direct hardware encoding via record() (separate pass or clear first):
+const nativePass = new RenderPassNode(screenTarget);
+nativePass.record((rawPass) => {
+    // Unabstracted native WebGPU API calls
+    rawPass.setPipeline(postProcessPipeline.native);
+    rawPass.setBindGroup(0, rawPostBindGroup);
+    rawPass.setVertexBuffer(0, rawCustomVbo);
+    rawPass.draw(3);
+});
+```
+
+### 8.4 Pattern D: Raw WebGPU Handle Interoperability
+
+Demonstrates binding raw `GPUTexture` and `GPUSampler` handles rendered by an isolated outsider RTT pass directly into an Awgpu `BindTable`:
+
+```typescript
+import {
+    Device,
+    BindLayout,
+    BindTable,
+    RasterPipeline,
+    RenderPassNode,
+    Target,
+} from "Atoolkit/awgpu_new";
+
+const gfx = await Device.create({ canvas: "#renderCanvas" });
+const rawDevice = gfx.native; // Raw GPUDevice
+
+// 1. Outsider Allocates Raw Handles (Zero Awgpu imports)
+const rawTexture = rawDevice.createTexture({
+    size: [512, 512],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+});
+const rawSampler = rawDevice.createSampler({ magFilter: "linear" });
+
+// 2. Outsider Records Native RTT Pass
+const outsiderEncoder = rawDevice.createCommandEncoder();
+const rttPass = outsiderEncoder.beginRenderPass({
+    colorAttachments: [{ view: rawTexture.createView(), loadOp: "clear", storeOp: "store" }],
+});
+// (Outsider native draws...)
+rttPass.end();
+
+// 3. Bind Raw Handles Directly in Awgpu (Zero Wrappers)
+const layout = BindLayout.builder()
+    .addTexture(0, GPUShaderStage.FRAGMENT)
+    .addSampler(1, GPUShaderStage.FRAGMENT)
+    .build(gfx);
+
+const table = BindTable.create(gfx, layout, [
+    { binding: 0, resource: rawTexture }, // GPUTexture accepted directly
+    { binding: 1, resource: rawSampler }, // GPUSampler accepted directly
+]);
+
+// 4. Record Awgpu Presentation Pass
+const target = Target.createScreen(gfx, { depthFormat: null });
+const screenPass = new RenderPassNode(target);
+screenPass.addDraw({ pipeline: displayPipeline, bindTables: [table], vertexCount: 3 });
+
+// 5. Submit Both Passes in a Single Hardware Queue Transaction
+const awgpuEncoder = gfx.createCommandEncoder();
+screenPass.execute(awgpuEncoder);
+gfx.submit([outsiderEncoder, awgpuEncoder]);
+```

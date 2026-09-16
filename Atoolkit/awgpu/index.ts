@@ -1,58 +1,84 @@
 // ================================================================
-//  Awgpu - Domain-Agnostic WebGPU Hardware Execution Engine
+//  Awgpu - Domain-Agnostic WebGPU Execution Engine
 // ================================================================
 
-// 1. Hardware Device & Canvas Presentation
+// Level 0: Hardware Foundation
 export {
     Device,
-    type DeviceOptions,
+    resolveDevice,
+    resolveQueue,
+    type DeviceConfig,
 } from "./device.js";
 
-// 2. Targets, Textures & Samplers
-export {
-    Texture,
-    Sampler,
-    RenderTarget,
-    type ColorAttachmentConfig,
-    type DepthAttachmentConfig,
-} from "./target.js";
-
-// 3. Buffers & Memory Pools
+// Level 1: Managed Hardware Memory & Handles
 export {
     Buffer,
     BufferPool,
-    type BufferData,
-} from "./buffer.js";
+    Texture,
+    Sampler,
+    resolveBuffer,
+    resolveTexture,
+    resolveTextureView,
+    resolveSampler,
+    type BufferSlice,
+    type BufferSourceData,
+    type ResolvedBuffer,
+} from "./memory.js";
 
-// 4. Layouts & Bind Group Frequency Slots
+// Level 2: Composable Data Structures
 export {
-    BindSlot,
-    BindGroupLayoutBuilder,
-    BindGroup,
-    type BindingEntry,
+    StreamSet,
+    VERTEX_FORMAT_SIZES,
+    type VertexStream,
+    type IndexStream,
+} from "./stream.js";
+
+export {
+    SwapBuffer,
+} from "./state.js";
+
+export {
+    Target,
+    type ColorTargetDesc,
+    type DepthTargetDesc,
+} from "./target.js";
+
+// Level 3: Resource Binding System
+export {
+    SlotFrequency,
+    BindLayout,
+    BindLayoutBuilder,
+    BindTable,
+    BindTableCache,
+    hashBindingEntries,
+    resolveBindingResource,
     type ResourceBinding,
-} from "./layout.js";
+    type BindingEntry,
+} from "./binding.js";
 
-// 5. Pipelines & Shader Modules
+// Level 4: Hardware Pipelines
 export {
-    createVertexLayout,
-    RenderPipeline,
+    RasterPipeline,
     ComputePipeline,
-    type VertexAttributeDesc,
-    type RenderPipelineDescriptor,
+    PipelineCache,
+    type RasterPipelineDesc,
+    type ComputePipelineDesc,
     type ShaderMessage,
 } from "./pipeline.js";
 
-// 6. Passes & Command Batches
+// Level 5: Command Sequencing & Execution Graph
 export {
-    Pass,
-    ComputePass,
-    type DrawCommand,
-    type ComputeCommand,
-    type DynamicOffsets,
-} from "./pass.js";
+    RenderPassNode,
+    ComputePassNode,
+    PassSequence,
+    type DrawBatch,
+    type ComputeBatch,
+    type DynamicOffsetRecord,
+} from "./sequence.js";
 
-// 7. Frame Orchestration
 export {
-    Frame,
-} from "./frame.js";
+    PassGraph,
+    RenderGraphNode,
+    ComputeGraphNode,
+    type GraphResource,
+} from "./graph.js";

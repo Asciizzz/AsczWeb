@@ -1,162 +1,189 @@
-import { RenderTarget } from "./target.js";
+// ================================================================
+//  Awgpu - Level 0: Hardware Foundation
+// ================================================================
 
-export interface DeviceOptions {
-    /** Target canvas element or selector string. If omitted, device initializes in headless mode. */
-    canvas?: string | HTMLCanvasElement | null;
-    /** Preferred texture format for canvas presentation; defaults to navigator.gpu.getPreferredCanvasFormat() */
-    format?: GPUTextureFormat;
-    /** Power preference for adapter selection; defaults to "high-performance" */
+export interface DeviceConfig {
+    canvas?: HTMLCanvasElement | string | null;
     powerPreference?: GPUPowerPreference;
-    /** Optional required WebGPU features */
     requiredFeatures?: GPUFeatureName[];
-    /** Optional required WebGPU limits */
-    requiredLimits?: Record<string, GPUSize64>;
-    /** Canvas presentation alpha mode; defaults to "premultiplied" */
+    requiredLimits?: Record<string, number>;
     alphaMode?: GPUCanvasAlphaMode;
-    /** Label for diagnostic and debugging identification */
-    label?: string;
-}
-
-function resolveCanvas(canvasRef: string | HTMLCanvasElement | null | undefined): HTMLCanvasElement | null {
-    if (!canvasRef) return null;
-    if (typeof HTMLCanvasElement !== "undefined" && canvasRef instanceof HTMLCanvasElement) return canvasRef;
-    if (typeof canvasRef === "string" && typeof document !== "undefined") {
-        const found = document.querySelector(canvasRef);
-        if (typeof HTMLCanvasElement !== "undefined" && found instanceof HTMLCanvasElement) return found;
-    }
-    return null;
+    onError?: (event: GPUUncapturedErrorEvent) => void;
+    onDeviceLost?: (info: GPUDeviceLostInfo) => void;
 }
 
 /**
- * Hardware WebGPU device wrapper managing adapter negotiation, device lifetime,
- * command submission queue, and canvas presentation context.
+ * Resolves a GPUDevice from either a Device instance or a native GPUDevice.
+ */
+export function resolveDevice(deviceOrGpu: Device | GPUDevice): GPUDevice {
+    return "device" in deviceOrGpu ? deviceOrGpu.device : deviceOrGpu;
+}
+
+/**
+ * Resolves GPUQueue from Device wrapper or raw GPUDevice.
+ */
+export function resolveQueue(deviceOrGpu: Device | GPUDevice): GPUQueue {
+    return "device" in deviceOrGpu ? deviceOrGpu.device.queue : deviceOrGpu.queue;
+}
+
+/**
+ * Encapsulates GPU adapter negotiation, device lifetime, and swapchain presentation.
  */
 export class Device {
     readonly adapter: GPUAdapter;
     readonly device: GPUDevice;
     readonly queue: GPUQueue;
     readonly canvas: HTMLCanvasElement | null;
-    readonly canvasContext: GPUCanvasContext | null;
+    readonly context: GPUCanvasContext | null;
     readonly format: GPUTextureFormat;
-    readonly label: string;
 
     constructor(
         adapter: GPUAdapter,
         device: GPUDevice,
-        format: GPUTextureFormat,
-        options: {
-            canvas?: HTMLCanvasElement | null;
-            canvasContext?: GPUCanvasContext | null;
-            label?: string;
-        } = {}
+        canvas: HTMLCanvasElement | null,
+        context: GPUCanvasContext | null,
+        format: GPUTextureFormat
     ) {
         this.adapter = adapter;
         this.device = device;
         this.queue = device.queue;
+        this.canvas = canvas;
+        this.context = context;
         this.format = format;
-        this.canvas = options.canvas ?? null;
-        this.canvasContext = options.canvasContext ?? null;
-        this.label = options.label ?? "Device";
     }
 
     /**
-     * Initializes WebGPU device connected to HTML canvas for graphics rendering.
+     * Unabstracted native GPUDevice handle.
      */
-    static async create(options: DeviceOptions = {}): Promise<Device> {
-        if (typeof navigator === "undefined" || !navigator.gpu) {
-            throw new Error("[Device] WebGPU is not supported or not available in this environment.");
+    get native(): GPUDevice {
+        return this.device;
+    }
+
+    /**
+     * Hardware limit capabilities negotiated for device.
+     */
+    get limits(): GPUSupportedLimits {
+        return this.device.limits;
+    }
+
+    /**
+     * Set of feature flags enabled on device.
+     */
+    get features(): GPUSupportedFeatures {
+        return this.device.features;
+    }
+
+    /**
+     * Promise resolving when device disconnection occurs.
+     */
+    get lost(): Promise<GPUDeviceLostInfo> {
+        return this.device.lost;
+    }
+
+    /**
+     * Factory: Negotiates hardware adapter, acquires GPUDevice, and configures canvas swapchain.
+     */
+    static async create(config: DeviceConfig = {}): Promise<Device> {
+        if (!navigator.gpu) {
+            throw new Error("WebGPU is not supported in this runtime environment.");
         }
 
-        const canvas = resolveCanvas(options.canvas);
-        const powerPreference = options.powerPreference ?? "high-performance";
+        const adapter = await navigator.gpu.requestAdapter({
+            powerPreference: config.powerPreference ?? "high-performance",
+        });
 
-        const adapter = await navigator.gpu.requestAdapter({ powerPreference });
         if (!adapter) {
-            throw new Error("[Device] Failed to acquire WebGPU GPUAdapter.");
+            throw new Error("Failed to acquire GPUAdapter matching requested configuration.");
         }
 
         const device = await adapter.requestDevice({
-            label: options.label ?? "Device_GPUDevice",
-            requiredFeatures: options.requiredFeatures,
-            requiredLimits: options.requiredLimits,
+            requiredFeatures: config.requiredFeatures,
+            requiredLimits: config.requiredLimits,
         });
 
-        const format = options.format ?? (canvas ? navigator.gpu.getPreferredCanvasFormat() : "rgba8unorm");
+        if (config.onError) {
+            device.addEventListener("uncapturederror", config.onError);
+        }
 
-        let canvasContext: GPUCanvasContext | null = null;
-        if (canvas) {
-            canvasContext = canvas.getContext("webgpu") as GPUCanvasContext | null;
-            if (!canvasContext) {
-                throw new Error("[Device] Failed to get WebGPU context from canvas element.");
+        if (config.onDeviceLost) {
+            device.lost.then(config.onDeviceLost);
+        }
+
+        let canvasEl: HTMLCanvasElement | null = null;
+        let ctx: GPUCanvasContext | null = null;
+        let preferredFormat: GPUTextureFormat = "rgba8unorm";
+
+        if (config.canvas) {
+            if (typeof config.canvas === "string") {
+                const el = document.querySelector(config.canvas);
+                if (!el || !(el instanceof HTMLCanvasElement)) {
+                    throw new Error(`Canvas element with selector '${config.canvas}' not found.`);
+                }
+                canvasEl = el;
+            } else {
+                canvasEl = config.canvas;
             }
-            canvasContext.configure({
+
+            ctx = canvasEl.getContext("webgpu");
+            if (!ctx) {
+                throw new Error("Failed to acquire WebGPU presentation context from canvas.");
+            }
+
+            preferredFormat = navigator.gpu.getPreferredCanvasFormat();
+            ctx.configure({
                 device,
-                format,
-                alphaMode: options.alphaMode ?? "premultiplied",
+                format: preferredFormat,
+                alphaMode: config.alphaMode ?? "premultiplied",
             });
         }
 
-        return new Device(adapter, device, format, {
-            canvas,
-            canvasContext,
-            label: options.label ?? "Device",
-        });
+        return new Device(adapter, device, canvasEl, ctx, preferredFormat);
     }
 
     /**
-     * Initializes headless WebGPU device without canvas (for compute passes, tests, or offscreen workers).
+     * Factory: Allocates a headless device omitting presentation swapchains for compute or offscreen testing.
      */
-    static async createHeadless(options: Omit<DeviceOptions, "canvas"> = {}): Promise<Device> {
-        return Device.create({ ...options, canvas: null });
+    static async createHeadless(config: DeviceConfig = {}): Promise<Device> {
+        return Device.create({ ...config, canvas: null });
     }
 
     /**
-     * Creates screen render target bound to device canvas swapchain.
+     * Instantiates a fresh GPUCommandEncoder with optional diagnostic label.
      */
-    createScreenTarget(
-        options: {
-            depthFormat?: GPUTextureFormat;
-            clearColor?: { r: number; g: number; b: number; a: number };
-            label?: string;
-        } = {}
-    ): RenderTarget {
-        if (!this.canvas || !this.canvasContext) {
-            throw new Error("[Device.createScreenTarget] Cannot create screen target on headless device.");
-        }
-        return RenderTarget.createScreen(this as any, options);
-    }
-
-    /**
-     * Creates fresh GPUCommandEncoder on device.
-     */
-    createCommandEncoder(label = "CommandEncoder"): GPUCommandEncoder {
+    createCommandEncoder(label?: string): GPUCommandEncoder {
         return this.device.createCommandEncoder({ label });
     }
 
+    private _singleSubmitArray: [GPUCommandBuffer] = [null as unknown as GPUCommandBuffer];
+
     /**
-     * Submits command buffers or command encoders to device queue.
+     * Accepts a single command buffer/encoder or an array of command buffers/encoders.
+     * Encoders are automatically finalized before submission.
      */
     submit(commands: (GPUCommandBuffer | GPUCommandEncoder)[] | GPUCommandBuffer | GPUCommandEncoder): void {
-        const list = Array.isArray(commands) ? commands : [commands];
-        const buffers: GPUCommandBuffer[] = list.map((c) => {
-            if ("finish" in c && typeof c.finish === "function") {
-                return (c as GPUCommandEncoder).finish();
-            }
-            return c as GPUCommandBuffer;
-        });
+        if (!Array.isArray(commands)) {
+            const buf = "finish" in commands ? commands.finish() : commands;
+            this._singleSubmitArray[0] = buf;
+            this.queue.submit(this._singleSubmitArray);
+            this._singleSubmitArray[0] = null as unknown as GPUCommandBuffer;
+            return;
+        }
+
+        const buffers: GPUCommandBuffer[] = new Array(commands.length);
+        for (let i = 0; i < commands.length; i++) {
+            const item = commands[i];
+            buffers[i] = "finish" in item ? item.finish() : item;
+        }
+
         this.queue.submit(buffers);
     }
 
     /**
-     * Destroys device resources and unconfigures canvas context.
+     * Unconfigures presentation context and releases hardware device resources.
      */
     destroy(): void {
-        if (this.canvasContext) {
-            try {
-                (this.canvasContext as GPUCanvasContext & { unconfigure?(): void }).unconfigure?.();
-            } catch {
-                // Ignore if unconfigure is unsupported in current browser
-            }
+        if (this.context) {
+            this.context.unconfigure();
         }
         this.device.destroy();
     }

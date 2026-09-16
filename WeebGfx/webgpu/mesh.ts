@@ -1,4 +1,4 @@
-import { Buffer } from "../../Atoolkit/awgpu/buffer.js";
+import { Buffer } from "../../Atoolkit/awgpu_old/buffer.js";
 import { MeshGPU, type MeshCPU } from "../mesh.js";
 
 /**

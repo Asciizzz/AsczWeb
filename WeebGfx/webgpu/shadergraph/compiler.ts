@@ -1,4 +1,4 @@
-import { RenderPipeline } from "../../../Atoolkit/awgpu/pipeline.js";
+import { RenderPipeline } from "../../../Atoolkit/awgpu_old/pipeline.js";
 import type {
     VertexLayout,
     VertexAttribute,
