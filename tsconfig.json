@@ -19,7 +19,7 @@
     "prototypes/AwgpuRayTracing/**/*.ts",
     "archive/AwgpuMotionGfx/**/*.ts",
     "prototypes/WeebGfxDemo/**/*.ts",
-    "archive/AestheteLyricMV/**/*.ts",
+    "prototypes/AestheteLyricMV/**/*.ts",
     "prototypes/Afashion/**/*.ts",
     "archive/SmokeView/**/*.ts",
     "archive/AwgpuRawInterop/**/*.ts",

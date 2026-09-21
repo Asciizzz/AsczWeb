@@ -9,7 +9,6 @@ dist/
 Thumbs.db
 
 # Prototypes and local development harness
-archive/
 prototypes/
 prototypes.json
 hub/
@@ -19,3 +18,6 @@ vite.config.ts
 # Internal guidelines
 AIsigns.md
 .agents/
+
+# Weirdass stuff
+archive/

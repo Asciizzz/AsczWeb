@@ -1,4 +1,4 @@
-# AsczSuperWeeb
+# AsczWeb
 
 TypeScript computational toolkit and WebGPU graphics architecture providing cache-coherent sparse-set ECS, allocation-free 3D math, value computation circuits, temporal cadence evaluation, and domain-agnostic GPU execution.
 
