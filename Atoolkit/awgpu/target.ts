@@ -2,7 +2,7 @@
 //  Awgpu - Level 2: Render Destination Coordinator (Target)
 // ================================================================
 
-import { type Device, resolveDevice } from "./device.js";
+import { type Device } from "./device.js";
 import { Texture, resolveTextureView } from "./memory.js";
 
 export interface ColorTargetDesc {
