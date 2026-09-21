@@ -1,26 +1,15 @@
 {
-  "name": "@asciiz/web",
-  "version": "0.1.0",
-  "type": "module",
-  "main": "./index.ts",
-  "types": "./index.ts",
-  "exports": {
-    ".": "./index.ts",
-    "./atoolkit": "./Atoolkit/index.ts",
-    "./atoolkit/*": "./Atoolkit/*/index.ts",
-    "./weebgfx": "./WeebGfx/index.ts",
-    "./weebgfx/*": "./WeebGfx/*.ts"
-  },
+  "name": "ascz-monorepo",
+  "private": true,
+  "workspaces": [
+    "Atoolkit",
+    "WeebGfx"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "yalc:publish": "cd Atoolkit && npx yalc publish && cd ../WeebGfx && npx yalc publish",
+    "yalc:push": "cd Atoolkit && npx yalc push && cd ../WeebGfx && npx yalc push"
   },
-  "files": [
-    "index.ts",
-    "Atoolkit/**/*.ts",
-    "WeebGfx/**/*.ts",
-    "README.md"
-  ],
   "devDependencies": {
     "@webgpu/types": "^0.1.71",
     "typescript": "^5.4.0"

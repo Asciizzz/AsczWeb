@@ -1,5 +1,5 @@
-import { Mat4 } from "../Atoolkit/alm/mat4.js";
-import { Vec3 } from "../Atoolkit/alm/vec3.js";
+import { Mat4 } from "@asciiz/atoolkit/alm/mat4.js";
+import { Vec3 } from "@asciiz/atoolkit/alm/vec3.js";
 
 export type CameraProjectionMode = "perspective" | "orthographic";
 

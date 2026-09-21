@@ -14,10 +14,24 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "baseUrl": ".",
+    "paths": {
+      "@asciiz/atoolkit": [
+        "./Atoolkit/index.ts"
+      ],
+      "@asciiz/atoolkit/*": [
+        "./Atoolkit/*"
+      ],
+      "@asciiz/weebgfx": [
+        "./WeebGfx/index.ts"
+      ],
+      "@asciiz/weebgfx/*": [
+        "./WeebGfx/*"
+      ]
+    }
   },
   "include": [
-    "index.ts",
     "Atoolkit/**/*.ts",
     "WeebGfx/**/*.ts"
   ],

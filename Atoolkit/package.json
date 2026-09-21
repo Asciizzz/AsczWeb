@@ -1,0 +1,33 @@
+{
+  "name": "@asciiz/atoolkit",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*",
+    "./alm": "./alm/index.ts",
+    "./alm/*": "./alm/*",
+    "./awgpu": "./awgpu/index.ts",
+    "./awgpu/*": "./awgpu/*",
+    "./awgpu_old": "./awgpu_old/index.ts",
+    "./awgpu_old/*": "./awgpu_old/*",
+    "./aecs": "./aecs/index.ts",
+    "./aecs/*": "./aecs/*",
+    "./atempo": "./atempo/index.ts",
+    "./atempo/*": "./atempo/*",
+    "./acircuit": "./acircuit/index.ts",
+    "./acircuit/*": "./acircuit/*",
+    "./adiag": "./adiag/index.ts",
+    "./adiag/*": "./adiag/*"
+  },
+  "files": [
+    "**/*.ts",
+    "ReadMe.md"
+  ],
+  "devDependencies": {
+    "@webgpu/types": "^0.1.71",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,4 +1,4 @@
-import { BufferPool } from "../../Atoolkit/awgpu_old/buffer.js";
+import { BufferPool } from "@asciiz/atoolkit/awgpu_old/buffer.js";
 import type { MeshCmp, ShaderCmp, TransformCmp, SkinCmp } from "../components.js";
 import type { ShaderParams } from "../types.js";
 import type { Camera } from "../camera.js";

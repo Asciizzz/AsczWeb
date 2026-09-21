@@ -1,0 +1,24 @@
+{
+  "name": "@asciiz/weebgfx",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*"
+  },
+  "files": [
+    "**/*.ts"
+  ],
+  "dependencies": {
+    "@asciiz/atoolkit": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@asciiz/atoolkit": "^0.1.0"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.71",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,4 +1,4 @@
-import { RenderPipeline } from "../../Atoolkit/awgpu_old/pipeline.js";
+import { RenderPipeline } from "@asciiz/atoolkit/awgpu_old/pipeline.js";
 import { ShaderGPU } from "../shader.js";
 import type { ShaderParams } from "../types.js";
 
