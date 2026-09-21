@@ -31,21 +31,6 @@ Repository centers on `Atoolkit` as foundational computational layer, `WeebGfx` 
 
 ---
 
-## Repository Structure
-
-* `Atoolkit/`: Production computational toolkit modules
-  * `aecs/`: Sparse-set Entity Component System
-  * `acircuit/`: Socket-based value computation circuit
-  * `awgpu/`: Hardware WebGPU execution engine
-  * `alm/`: Allocation-free 3D linear algebra
-  * `atempo/`: Temporal orchestration, cadence quantization, and spring dynamics
-  * `adiag/`: Diagnostic telemetry bus and causal error tracer
-* `WeebGfx/`: API-agnostic graphics abstractions and WebGPU renderer
-  * `webgpu/`: WebGPU rendering pipeline and shader graph compiler
-* `archive/`: Archived legacy modules preserved for reference (`acmp`, `aflow`, `agraph`, `awgl2`, legacy `awgpu`)
-
----
-
 ## Core Engineering Invariants
 
 1. **Zero-Allocation Calling Convention**:

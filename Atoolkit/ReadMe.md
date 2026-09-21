@@ -1,6 +1,6 @@
 # Atoolkit: Modular Computational Toolkit & Hardware Execution Framework
 
-Atoolkit is a collection of zero-dependency TypeScript modules designed for simulation, numerical evaluation, entity management, and WebGPU hardware execution.
+A collection of zero-dependency TypeScript modules designed for simulation, numerical evaluation, entity management, and WebGPU hardware execution.
 
 All modules share common engineering invariants: zero-allocation calling conventions on hot paths, contiguous typed array storage, deterministic execution plans, and dual-tier hardware transparency.
 
@@ -23,7 +23,7 @@ All modules share common engineering invariants: zero-allocation calling convent
 
 ### 2.1 aecs: Entity Component System
 
-Located in [`aecs/`](./aecs/). High-performance, sets-first ECS decoupled from rigid scene graphs.
+High-performance, sets-first ECS decoupled from rigid scene graphs.
 
 - **Entity Allocation**: `Entity` packs a 20-bit slot index and a 12-bit generation counter into a single integer. `EntityPool` manages issuance, generational validation, and slot recycling via an internal free-list array.
 - **Dense Storage Primitives**:
@@ -33,7 +33,7 @@ Located in [`aecs/`](./aecs/). High-performance, sets-first ECS decoupled from r
 
 ### 2.2 alm: 3D Linear Algebra & Spatial Primitives
 
-Located in [`alm/`](./alm/). High-performance 3D mathematics built directly on native typed arrays.
+High-performance 3D mathematics built directly on native typed arrays.
 
 - **Storage Layout**: Every mathematical primitive (`Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3`, `Mat4`) subclasses `Float32Array` directly. Slices and views write directly into WebGPU buffers (`device.queue.writeBuffer`) with zero serialization or memory copying.
 - **Dual Calling Convention**:
@@ -43,7 +43,7 @@ Located in [`alm/`](./alm/). High-performance 3D mathematics built directly on n
 
 ### 2.3 atempo: Temporal Orchestration & Cadence
 
-Located in [`atempo/`](./atempo/). Time-shaping functions and sequence evaluation primitives decoupled from concrete data interpolation.
+Time-shaping functions and sequence evaluation primitives decoupled from concrete data interpolation.
 
 - **Sequence Evaluation**: `Track<T, TOut>` manages chronological keyframe sequences, locates active interval spans via cached index pointers (falling back to O(log N) binary search on non-linear seeks), and shapes progress using unary transfer functions (`Curve`).
 - **Composite Timelines**: `Clip` evaluates heterogeneous tracks simultaneously across a unified temporal coordinate space.
@@ -52,7 +52,7 @@ Located in [`atempo/`](./atempo/). Time-shaping functions and sequence evaluatio
 
 ### 2.4 acircuit: Directed Computation Circuit
 
-Located in [`acircuit/`](./acircuit/). Value computation graph featuring static topology validation and plan caching.
+Value computation graph featuring static topology validation and plan caching.
 
 - **Endpoints & Connections**: `Socket` declares input or output endpoints with optional data type constraints and requirement tags. `Wire` defines directed connections linking an output socket to an input socket. Input sockets strictly enforce 1-to-1 connections; output sockets support 1-to-N fan-out.
 - **Computation Units**: `Chip` represents a stateless computational node that declares socket schemas and evaluates input records.
@@ -61,7 +61,7 @@ Located in [`acircuit/`](./acircuit/). Value computation graph featuring static 
 
 ### 2.5 awgpu: Six-Tier WebGPU Hardware Engine
 
-Located in [`awgpu/`](./awgpu/). Domain-agnostic WebGPU execution engine built across six distinct compositional levels:
+Domain-agnostic WebGPU execution engine built across six distinct compositional levels:
 
 - **Level 0 (Hardware Foundation)**: `Device` acquires adapters, logical devices, and queue handles. Exposes hardware telemetry (`limits`, `features`, `lost`) and attaches error hooks (`onError`, `onDeviceLost`).
 - **Level 1 (Managed Memory)**: `Buffer` encapsulates sized allocations and uniform alignment. `BufferPool` recycles transient buffers across frames via power-of-two size bucketing. `Texture` handles 256-byte aligned row stride calculations (`write2D`) and external image copy (`copyExternalImage`). `Sampler` configures filtering and shadow comparison modes.
@@ -72,7 +72,7 @@ Located in [`awgpu/`](./awgpu/). Domain-agnostic WebGPU execution engine built a
 
 ### 2.6 adiag: Diagnostic Telemetry Bus
 
-Located in [`adiag/`](./adiag/). Structured diagnostics and causal error tracing without cross-boundary thrown exceptions.
+Structured diagnostics and causal error tracing without cross-boundary thrown exceptions.
 
 - **Structured Records**: `Result` captures category types (`"ok"`, `"err"`, `"warn"`, `"info"`), machine-readable codes, templated messages, arbitrary key-value payloads, and parent error references (`ref`).
 - **Circular History**: `Bus` logs diagnostic records into a pre-allocated circular ring buffer (default 1000 entries) in O(1) time, overwriting oldest records when capacity is reached.
