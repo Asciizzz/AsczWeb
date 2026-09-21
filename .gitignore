@@ -8,16 +8,7 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Prototypes and local development harness
-prototypes/
-prototypes.json
-hub/
-index.html
-vite.config.ts
-
-# Internal guidelines
-AIsigns.md
-.agents/
-
-# Weirdass stuff
+# Archives and internal notes
 archive/
+.agents/
+AIsigns.md

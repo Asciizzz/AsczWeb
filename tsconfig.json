@@ -3,27 +3,29 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["@webgpu/types"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "@webgpu/types"
+    ],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "isolatedModules": true
   },
   "include": [
+    "index.ts",
     "Atoolkit/**/*.ts",
-    "WeebRender/**/*.ts",
-    "WeebGfx/**/*.ts",
-    "archive/AwgpuShadowDemo/**/*.ts",
-    "archive/RhythmGraphicArt/**/*.ts",
-    "prototypes/AwgpuRayTracing/**/*.ts",
-    "archive/AwgpuMotionGfx/**/*.ts",
-    "prototypes/WeebGfxDemo/**/*.ts",
-    "prototypes/AestheteLyricMV/**/*.ts",
-    "prototypes/Afashion/**/*.ts",
-    "archive/SmokeView/**/*.ts",
-    "archive/AwgpuRawInterop/**/*.ts",
-    "hub/**/*.ts"
+    "WeebGfx/**/*.ts"
   ],
-  "exclude": ["node_modules", "dist", ".tsc-dist", ".vite", "**/*.config.ts", "archive"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    ".tsc-dist",
+    ".vite",
+    "archive"
+  ]
 }
