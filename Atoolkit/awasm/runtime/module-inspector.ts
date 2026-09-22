@@ -1,3 +1,7 @@
+// ================================================================
+//  Awasm - Runtime: ModuleInspector
+// ================================================================
+
 export type WasmExportKind = "function" | "table" | "memory" | "global";
 export type WasmImportKind = "function" | "table" | "memory" | "global";
 
@@ -20,21 +24,13 @@ export interface ModuleManifest {
 }
 
 /**
- * Static binary inspector and validator for WebAssembly modules.
- *
- * Class Responsibility:
- * Analyzes compiled WebAssembly modules without instantiating them.
- * Extracts interface schemas, import dependencies, and export symbols.
- *
- * Method Contracts:
- * - inspect(module: WebAssembly.Module): Extracts manifest of exports, imports, and memory.
- * - validate(bytes: BufferSource): Validates binary byte sequence against WebAssembly spec.
- *
- * Operational Invariants:
- * - Executes synchronously using native WebAssembly.Module static methods.
- * - Instantiation-free introspection: executes no guest start code and allocates no linear memory.
+ * Static binary inspector and validator for uninstantiated WebAssembly modules.
+ * Extracts interface schemas, import dependencies, and export symbols synchronously.
  */
 export class ModuleInspector {
+    /**
+     * Inspects module exports and imports without instantiating or executing guest code.
+     */
     public static inspect(module: WebAssembly.Module): ModuleManifest {
         const rawExports = WebAssembly.Module.exports(module);
         const rawImports = WebAssembly.Module.imports(module);
@@ -65,6 +61,9 @@ export class ModuleInspector {
         };
     }
 
+    /**
+     * Validates binary byte sequence against the WebAssembly specification.
+     */
     public static validate(bytes: BufferSource): boolean {
         return WebAssembly.validate(bytes);
     }

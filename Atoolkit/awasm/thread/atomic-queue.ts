@@ -1,23 +1,15 @@
+// ================================================================
+//  Awasm - Threading: AtomicQueue
+// ================================================================
+
 /**
  * Lock-free circular ring buffer residing in shared linear memory.
+ * Coordinates message passing between worker threads via atomic load and store operations.
  *
- * Class Responsibility:
- * Coordinates lock-free message passing between worker threads via atomic load/store
- * operations on shared 32-bit integer slots.
- *
- * Layout in shared memory:
+ * Memory layout:
  * - offset + 0: Atomic Head Index (4 bytes)
  * - offset + 4: Atomic Tail Index (4 bytes)
  * - offset + 8: Ring buffer slots (capacity * 4 bytes)
- *
- * Method Contracts:
- * - enqueue(value: number): Appends 32-bit integer. Returns false when ring buffer is full.
- * - dequeue(): Reads and removes next 32-bit integer. Returns null when empty.
- * - get length(): Returns instantaneous pending item count.
- *
- * Operational Invariants:
- * - Capacity must be a power of two for mask-based wrapping.
- * - Zero memory allocations during enqueue and dequeue operations.
  */
 export class AtomicQueue {
     private readonly _view: Int32Array;
@@ -44,12 +36,15 @@ export class AtomicQueue {
         this._mask = capacityPowerOfTwo - 1;
     }
 
+    /**
+     * Appends a 32-bit integer to the ring buffer. Returns false when full.
+     */
     public enqueue(value: number): boolean {
         const head = Atomics.load(this._view, this._headIndex);
         const tail = Atomics.load(this._view, this._tailIndex);
 
         if (tail - head >= this._capacity) {
-            return false; // Queue full
+            return false;
         }
 
         const slotIndex = this._dataBaseIndex + (tail & this._mask);
@@ -59,12 +54,15 @@ export class AtomicQueue {
         return true;
     }
 
+    /**
+     * Reads and removes the next 32-bit integer from the ring buffer. Returns null when empty.
+     */
     public dequeue(): number | null {
         const head = Atomics.load(this._view, this._headIndex);
         const tail = Atomics.load(this._view, this._tailIndex);
 
         if (head >= tail) {
-            return null; // Queue empty
+            return null;
         }
 
         const slotIndex = this._dataBaseIndex + (head & this._mask);
@@ -84,6 +82,9 @@ export class AtomicQueue {
         return this._capacity;
     }
 
+    /**
+     * Calculates the total byte size required to host ring buffer metadata and slots.
+     */
     public static requiredBytes(capacityPowerOfTwo: number): number {
         return (2 + capacityPowerOfTwo) * 4;
     }

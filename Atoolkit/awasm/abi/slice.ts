@@ -1,21 +1,12 @@
+// ================================================================
+//  Awasm - ABI: Slice
+// ================================================================
+
 import { WasmMemory } from "../memory/wasm-memory.js";
 
 /**
  * Value object encapsulating a span of WebAssembly linear memory (pointer + length).
- *
- * Class Responsibility:
- * Represents guest memory boundaries. Exposes typed sub-array views and transfer
- * methods without duplicating memory buffers.
- *
- * Method Contracts:
- * - readUint8(memory: WasmMemory): Returns Uint8Array window across slice span.
- * - readFloat32(memory: WasmMemory): Returns Float32Array window across slice span.
- * - readUint32(memory: WasmMemory): Returns Uint32Array window across slice span.
- * - copyFrom(source: ArrayBufferView, memory: WasmMemory): Writes external bytes into guest memory.
- *
- * Operational Invariants:
- * - Operates strictly as an address window over active linear memory buffer.
- * - Validates pointer and length against memory byte length.
+ * Exposes zero-copy typed sub-array views and transfer methods over active linear memory buffers.
  */
 export class Slice {
     public readonly ptr: number;
@@ -32,11 +23,17 @@ export class Slice {
         this.length = length;
     }
 
+    /**
+     * Slices an 8-bit unsigned integer view across the memory span.
+     */
     public readUint8(memory: WasmMemory): Uint8Array {
         this.assertBounds(memory);
         return new Uint8Array(memory.buffer, this.ptr, this.length);
     }
 
+    /**
+     * Slices a 32-bit floating point view across the memory span. Requires 4-byte pointer alignment.
+     */
     public readFloat32(memory: WasmMemory): Float32Array {
         this.assertBounds(memory);
         if ((this.ptr & 3) !== 0) {
@@ -46,6 +43,9 @@ export class Slice {
         return new Float32Array(memory.buffer, this.ptr, elementCount);
     }
 
+    /**
+     * Slices a 32-bit unsigned integer view across the memory span. Requires 4-byte pointer alignment.
+     */
     public readUint32(memory: WasmMemory): Uint32Array {
         this.assertBounds(memory);
         if ((this.ptr & 3) !== 0) {
@@ -55,6 +55,9 @@ export class Slice {
         return new Uint32Array(memory.buffer, this.ptr, elementCount);
     }
 
+    /**
+     * Copies external typed array bytes directly into the guest linear memory span.
+     */
     public copyFrom(source: ArrayBufferView, memory: WasmMemory): void {
         this.assertBounds(memory);
         const sourceBytes = new Uint8Array(source.buffer, source.byteOffset, source.byteLength);

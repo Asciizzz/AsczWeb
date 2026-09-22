@@ -1,19 +1,15 @@
+// ================================================================
+//  Awasm - Runtime: ModuleLoader
+// ================================================================
+
 /**
  * WebAssembly binary acquisition and compilation coordinator.
- *
- * Class Responsibility:
- * Compiles WebAssembly modules from streaming network responses or memory buffers.
- * Supports optional IndexedDB caching for compiled bytecode persistence across sessions.
- *
- * Method Contracts:
- * - compile(source: BufferSource | Response | Promise<Response>): Compiles module using streaming or buffered path.
- * - compileCached(key: string, sourceProvider: () => Promise<BufferSource | Response>): Compiles with IndexedDB caching.
- *
- * Operational Invariants:
- * - Uses WebAssembly.compileStreaming when given Response objects to bypass JavaScript heap buffering.
- * - IndexedDB caching gracefully falls back to direct compilation if database is unavailable.
+ * Supports streaming compilation for Response streams and optional IndexedDB bytecode caching.
  */
 export class ModuleLoader {
+    /**
+     * Compiles a WebAssembly module from streaming network responses or in-memory buffers.
+     */
     public static async compile(source: BufferSource | Response | Promise<Response>): Promise<WebAssembly.Module> {
         if (typeof Response !== "undefined" && (source instanceof Response || source instanceof Promise)) {
             if (typeof WebAssembly.compileStreaming === "function") {
@@ -35,6 +31,9 @@ export class ModuleLoader {
         return await WebAssembly.compile(source as BufferSource);
     }
 
+    /**
+     * Compiles a WebAssembly module with persistent IndexedDB bytecode caching across sessions.
+     */
     public static async compileCached(
         key: string,
         sourceProvider: () => Promise<BufferSource | Response>
@@ -47,7 +46,6 @@ export class ModuleLoader {
         const source = await sourceProvider();
         const compiled = await this.compile(source);
 
-        // Best-effort cache write
         this.writeToCache(key, compiled).catch(() => {});
 
         return compiled;

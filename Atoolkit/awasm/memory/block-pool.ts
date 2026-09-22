@@ -1,22 +1,12 @@
+// ================================================================
+//  Awasm - Linear Memory: BlockPool
+// ================================================================
+
 import { WasmMemory } from "./wasm-memory.js";
 
 /**
- * Fixed-size slab allocator with intrusive free-list storage in linear memory.
- *
- * Class Responsibility:
- * Manages recycling of uniform memory blocks without JavaScript heap allocation.
- * Tracks available slots via an intrusive single-linked list stored in the first 4 bytes
- * of idle blocks.
- *
- * Method Contracts:
- * - acquire(): Pops free block pointer from intrusive stack in O(1) time. Returns -1 when exhausted.
- * - release(pointer: number): Pushes block back to intrusive stack in O(1) time.
- * - initialize(): Formats free-list links across all blocks.
- *
- * Operational Invariants:
- * - Intrusive pointers store next free byte offsets as 32-bit unsigned integers.
- * - Minimum block size is 4 bytes to accommodate intrusive pointers.
- * - Zero heap allocations during acquire and release cycles.
+ * Fixed-size slab allocator managing uniform memory blocks in linear memory.
+ * Maintains an intrusive single-linked free-list in the first 4 bytes of idle blocks.
  */
 export class BlockPool {
     private readonly _memory: WasmMemory;
@@ -60,12 +50,16 @@ export class BlockPool {
             ptr = nextPtr;
         }
 
-        // Final block points to -1 (0xFFFFFFFF)
+        // Final block terminator: 0xFFFFFFFF
         view.setUint32(ptr, 0xffffffff, true);
         this._freeHead = this._offset;
         this._availableCount = this._blockCount;
     }
 
+    /**
+     * Acquires a free block from the intrusive stack in O(1) time.
+     * Returns byte offset pointer, or -1 when pool is exhausted.
+     */
     public acquire(): number {
         if (this._freeHead === 0xffffffff || this._availableCount === 0) {
             return -1;
@@ -79,6 +73,9 @@ export class BlockPool {
         return allocatedPtr;
     }
 
+    /**
+     * Releases an allocated block back to the intrusive stack in O(1) time.
+     */
     public release(pointer: number): void {
         if (pointer < this._offset || pointer >= this._offset + this._blockCount * this._blockSize) {
             throw new Error(`Pointer ${pointer} falls outside block pool span`);

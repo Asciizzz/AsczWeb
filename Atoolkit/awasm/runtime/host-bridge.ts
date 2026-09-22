@@ -1,3 +1,7 @@
+// ================================================================
+//  Awasm - Runtime: HostBridge
+// ================================================================
+
 export interface HostEnvOptions {
     onAbort?: (message: string, file: string, line: number, column: number) => void;
     onLog?: (message: string) => void;
@@ -6,19 +10,7 @@ export interface HostEnvOptions {
 
 /**
  * Host function import table builder.
- *
- * Class Responsibility:
- * Registers JavaScript functions to be linked into WebAssembly modules.
- * Supplies default environment hooks for timing, abort/panic reporting, and diagnostics.
- *
- * Method Contracts:
- * - register(moduleName: string, exportName: string, fn: Function): Registers host function.
- * - registerDefaultEnv(options?: HostEnvOptions): Injects env.now, env.abort, and env.log.
- * - build(): Compiles internal dictionary into WebAssembly.Imports format.
- *
- * Operational Invariants:
- * - Direct function binding without intermediate wrapper allocations on hot paths.
- * - Supports nested namespace mapping matching WebAssembly import structures.
+ * Registers JavaScript functions and default environment hooks to link into WebAssembly modules.
  */
 export class HostBridge {
     private readonly _imports: Record<string, Record<string, any>>;
@@ -27,6 +19,9 @@ export class HostBridge {
         this._imports = {};
     }
 
+    /**
+     * Registers a single host function under the specified module and export name.
+     */
     public register(moduleName: string, exportName: string, fn: any): this {
         if (!this._imports[moduleName]) {
             this._imports[moduleName] = {};
@@ -35,6 +30,9 @@ export class HostBridge {
         return this;
     }
 
+    /**
+     * Registers a record of host functions under the specified module namespace.
+     */
     public registerModule(moduleName: string, functions: Record<string, any>): this {
         if (!this._imports[moduleName]) {
             this._imports[moduleName] = {};
@@ -43,6 +41,9 @@ export class HostBridge {
         return this;
     }
 
+    /**
+     * Injects standard default environment hooks: env.now, env.abort, and optional env.log.
+     */
     public registerDefaultEnv(options: HostEnvOptions = {}): this {
         const nowFn = options.nowProvider ?? (() => (typeof performance !== "undefined" ? performance.now() : Date.now()));
         const abortFn = options.onAbort ?? ((msg, file, line, col) => {
@@ -61,6 +62,9 @@ export class HostBridge {
         return this;
     }
 
+    /**
+     * Compiles registered imports into the WebAssembly.Imports dictionary format.
+     */
     public build(): WebAssembly.Imports {
         return this._imports as WebAssembly.Imports;
     }

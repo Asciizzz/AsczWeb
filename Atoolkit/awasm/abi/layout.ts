@@ -1,3 +1,7 @@
+// ================================================================
+//  Awasm - ABI: StructLayout
+// ================================================================
+
 export type StructFieldType =
     | "i8"
     | "u8"
@@ -37,7 +41,7 @@ const TYPE_SIZES: Record<StructFieldType, number> = {
     f32: 4,
     f64: 8,
     v128: 16,
-    ptr: 4, // 32-bit WebAssembly linear memory pointer
+    ptr: 4,
 };
 
 const TYPE_ALIGNMENTS: Record<StructFieldType, number> = {
@@ -49,26 +53,13 @@ const TYPE_ALIGNMENTS: Record<StructFieldType, number> = {
     u32: 4,
     f32: 4,
     f64: 8,
-    v128: 16, // SIMD v128 requires 16-byte alignment
+    v128: 16,
     ptr: 4,
 };
 
 /**
  * Declarative binary struct layout calculator conforming to C/Rust repr(C) rules.
- *
- * Class Responsibility:
- * Calculates member byte offsets, alignment padding, and total struct stride.
- * Provides lookup tables for fast offset indexing in linear memory.
- *
- * Method Contracts:
- * - field(name: string, type: StructFieldType, count?: number): Appends struct member.
- * - finish(packAlignment?: number): Computes final stride and returns StructDescriptor.
- * - getField(descriptor: StructDescriptor, name: string): Returns field metadata.
- *
- * Operational Invariants:
- * - Automatically aligns each member to its natural alignment or packAlignment limit.
- * - Total stride is padded to a multiple of largest member alignment.
- * - Supports 16-byte alignment for WebAssembly SIMD v128 vectors.
+ * Computes member byte offsets, alignment padding, and total struct stride with SIMD support.
  */
 export class StructLayout {
     private readonly _name: string;
@@ -83,6 +74,9 @@ export class StructLayout {
         this._maxAlignment = 1;
     }
 
+    /**
+     * Appends a member field to the layout, aligning offset to the field's natural or explicit alignment.
+     */
     public field(name: string, type: StructFieldType, count: number = 1, explicitAlignment?: number): this {
         if (count <= 0) {
             throw new Error(`Field count must be at least 1, received ${count}`);
@@ -112,6 +106,9 @@ export class StructLayout {
         return this;
     }
 
+    /**
+     * Finalizes struct layout, computing total stride padded to a multiple of largest member alignment.
+     */
     public finish(packAlignment?: number): StructDescriptor {
         const align = packAlignment !== undefined ? Math.min(this._maxAlignment, packAlignment) : this._maxAlignment;
         const mask = align - 1;
@@ -132,6 +129,9 @@ export class StructLayout {
         };
     }
 
+    /**
+     * Retrieves member field metadata from a compiled StructDescriptor in O(1) time.
+     */
     public static getField(descriptor: StructDescriptor, name: string): StructField {
         const field = descriptor.fieldMap.get(name);
         if (!field) {

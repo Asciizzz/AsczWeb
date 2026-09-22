@@ -1,3 +1,7 @@
+// ================================================================
+//  Awasm - Threading: WorkerPool
+// ================================================================
+
 import { SharedMemory } from "./shared-memory.js";
 
 export interface WorkerTaskMessage {
@@ -16,20 +20,8 @@ export interface WorkerResultMessage {
 }
 
 /**
- * Multi-threaded worker pool coordinating tasks on shared WebAssembly instances.
- *
- * Class Responsibility:
- * Spawns and manages dedicated Web Workers. Broadcasts compiled modules and
- * SharedMemory handles, and dispatches compute tasks across worker threads.
- *
- * Method Contracts:
- * - initialize(module: WebAssembly.Module, memory: SharedMemory): Injects module and memory into all workers.
- * - dispatch(taskIndex: number, arg0?: number, arg1?: number): Dispatches task to next available worker.
- * - terminate(): Halts and cleans up all active worker threads.
- *
- * Operational Invariants:
- * - Broadcasts WebAssembly.Module and WebAssembly.Memory handles via structured clone.
- * - Workers access linear memory without cross-thread data serialization.
+ * Multi-threaded worker pool coordinating compute tasks on shared WebAssembly instances.
+ * Broadcasts compiled modules and SharedMemory handles to Web Workers via structured cloning.
  */
 export class WorkerPool {
     private readonly _workers: Worker[];
@@ -61,6 +53,9 @@ export class WorkerPool {
         }
     }
 
+    /**
+     * Broadcasts the compiled WebAssembly.Module and SharedMemory to all workers in the pool.
+     */
     public async initialize(module: WebAssembly.Module, memory: SharedMemory): Promise<void> {
         if (this._isInitialized) {
             return;
@@ -89,6 +84,9 @@ export class WorkerPool {
         this._isInitialized = true;
     }
 
+    /**
+     * Dispatches a computational task to the next available worker in round-robin order.
+     */
     public dispatch<T = unknown>(taskIndex: number, arg0: number = 0, arg1: number = 0): Promise<T> {
         if (!this._isInitialized) {
             throw new Error("WorkerPool must be initialized with module and shared memory before dispatching tasks");
@@ -114,6 +112,9 @@ export class WorkerPool {
         });
     }
 
+    /**
+     * Terminates all active worker threads and clears pending tasks.
+     */
     public terminate(): void {
         for (let i = 0; i < this._workers.length; i++) {
             this._workers[i].terminate();

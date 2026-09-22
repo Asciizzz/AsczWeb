@@ -1,3 +1,7 @@
+// ================================================================
+//  Awasm - Linear Memory: WasmMemory
+// ================================================================
+
 export interface MemoryDescriptor {
     initial: number;
     maximum?: number;
@@ -7,20 +11,8 @@ export interface MemoryDescriptor {
 export type MemoryResizeListener = (newBuffer: ArrayBuffer, previousByteLength: number) => void;
 
 /**
- * Manages WebAssembly.Memory lifecycle, page expansion, and buffer stability.
- *
- * Class Responsibility:
- * Owns WebAssembly.Memory instance. Tracks page counts, maximum bounds, and allocation
- * generation counter. Dispatches resize notifications upon memory growth.
- *
- * Method Contracts:
- * - constructor(descriptor: MemoryDescriptor): Instantiates native WebAssembly.Memory.
- * - grow(deltaPages: number): Invokes native grow(), increments generation, notifies listeners.
- * - onResize(listener: MemoryResizeListener): Registers callback invoked upon buffer reallocation.
- *
- * Operational Invariants:
- * - WebAssembly page size is exactly 65,536 bytes (64 KiB).
- * - Memory growth detaches old ArrayBuffer. Generation counter increments on every successful grow.
+ * Managed WebAssembly memory coordinator tracking page growth, limits, and buffer stability.
+ * Holds direct ownership of native WebAssembly.Memory and notifies listeners when buffer reallocation occurs.
  */
 export class WasmMemory {
     private readonly _memory: WebAssembly.Memory;
@@ -44,6 +36,9 @@ export class WasmMemory {
         });
     }
 
+    /**
+     * Adopts an existing native WebAssembly.Memory instance.
+     */
     public static fromNative(memory: WebAssembly.Memory, initialPages: number = 1): WasmMemory {
         const instance = Object.create(WasmMemory.prototype) as WasmMemory;
         (instance as any)._memory = memory;
@@ -54,6 +49,10 @@ export class WasmMemory {
         return instance;
     }
 
+    /**
+     * Grows linear memory by the specified page delta.
+     * Increments generation counter and notifies registered resize listeners.
+     */
     public grow(deltaPages: number): number {
         if (deltaPages <= 0) {
             return this._pageCount;
@@ -72,6 +71,10 @@ export class WasmMemory {
         return previousPages;
     }
 
+    /**
+     * Registers a callback invoked immediately when memory grows and the underlying buffer is reallocated.
+     * Returns an unregister function.
+     */
     public onResize(listener: MemoryResizeListener): () => void {
         this._listeners.push(listener);
         return () => {

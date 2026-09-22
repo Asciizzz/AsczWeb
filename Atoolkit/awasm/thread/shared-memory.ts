@@ -1,27 +1,17 @@
+// ================================================================
+//  Awasm - Threading: SharedMemory
+// ================================================================
+
 export interface SharedMemoryDescriptor {
     initial: number;
-    maximum: number; // WebAssembly spec requires maximum when shared is true
+    maximum: number;
 }
 
 export type WaitResult = "ok" | "not-equal" | "timed-out";
 
 /**
  * Shared linear memory coordinator backed by SharedArrayBuffer and Atomics.
- *
- * Class Responsibility:
- * Allocates thread-safe WebAssembly linear memory accessible concurrently across
- * Web Workers. Exposes atomic synchronization primitives (wait, notify) directly
- * on 32-bit integer offsets.
- *
- * Method Contracts:
- * - wait(byteOffset: number, expectedValue: number, timeoutMs?: number): Executes Atomics.wait.
- * - notify(byteOffset: number, count?: number): Executes Atomics.notify.
- * - get buffer(): Returns SharedArrayBuffer.
- * - get handle(): Returns native WebAssembly.Memory.
- *
- * Operational Invariants:
- * - shared: true requires explicit maximum page count per WebAssembly standard.
- * - Atomics.wait cannot execute on browser main thread; validates calling context.
+ * Provides thread-safe WebAssembly memory accessible across Web Workers.
  */
 export class SharedMemory {
     private readonly _memory: WebAssembly.Memory;
@@ -48,6 +38,10 @@ export class SharedMemory {
         this._int32View = new Int32Array(this._memory.buffer);
     }
 
+    /**
+     * Executes Atomics.wait on the 32-bit integer location at the specified byte offset.
+     * Note: Cannot execute on browser main UI thread.
+     */
     public wait(byteOffset: number, expectedValue: number, timeoutMs?: number): WaitResult {
         if ((byteOffset & 3) !== 0) {
             throw new Error(`Byte offset must be 4-byte aligned for 32-bit atomics, received ${byteOffset}`);
@@ -56,6 +50,9 @@ export class SharedMemory {
         return Atomics.wait(this._int32View, index, expectedValue, timeoutMs);
     }
 
+    /**
+     * Executes Atomics.notify on the 32-bit integer location at the specified byte offset.
+     */
     public notify(byteOffset: number, count: number = 1): number {
         if ((byteOffset & 3) !== 0) {
             throw new Error(`Byte offset must be 4-byte aligned for 32-bit atomics, received ${byteOffset}`);
@@ -64,11 +61,17 @@ export class SharedMemory {
         return Atomics.notify(this._int32View, index, count);
     }
 
+    /**
+     * Performs an atomic 32-bit integer read at the specified byte offset.
+     */
     public load(byteOffset: number): number {
         const index = byteOffset >> 2;
         return Atomics.load(this._int32View, index);
     }
 
+    /**
+     * Performs an atomic 32-bit integer write at the specified byte offset.
+     */
     public store(byteOffset: number, value: number): number {
         const index = byteOffset >> 2;
         return Atomics.store(this._int32View, index, value);

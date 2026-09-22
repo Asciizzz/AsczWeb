@@ -1,22 +1,12 @@
+// ================================================================
+//  Awasm - Linear Memory: LinearArena
+// ================================================================
+
 import { WasmMemory } from "./wasm-memory.js";
 
 /**
  * Monotonic bump allocator operating within a reserved span of linear memory.
- *
- * Class Responsibility:
- * Controls sequential bump allocations in a linear memory region. Enforces power-of-two
- * byte alignments (4, 8, 16) and supports watermark rewind/reset without garbage collection.
- *
- * Method Contracts:
- * - allocate(byteSize: number, alignment?: number): Advances offset to aligned boundary and returns pointer.
- * - mark(): Returns current allocation offset.
- * - rewind(mark: number): Restores allocation offset to specified watermark.
- * - reset(): Resets allocation offset to base pointer.
- *
- * Operational Invariants:
- * - O(1) allocation time complexity.
- * - Zero JavaScript heap allocations on allocation hot paths.
- * - 16-byte alignment satisfies SIMD v128 vector memory constraints.
+ * Enforces power-of-two alignments and provides O(1) watermark rewind and reset operations.
  */
 export class LinearArena {
     private readonly _memory: WasmMemory;
@@ -40,12 +30,15 @@ export class LinearArena {
         this._byteCapacity = byteCapacity !== undefined ? Math.min(byteCapacity, maxAvailable) : maxAvailable;
     }
 
+    /**
+     * Allocates a contiguous byte span with the specified power-of-two alignment.
+     * Automatically expands underlying linear memory when permitted.
+     */
     public allocate(byteSize: number, alignment: number = 8): number {
         if (byteSize <= 0) {
             return this._currentOffset;
         }
 
-        // Align up: (offset + align - 1) & ~(align - 1)
         const mask = alignment - 1;
         if ((alignment & mask) !== 0) {
             throw new Error(`Alignment must be a power of two, received ${alignment}`);
@@ -55,7 +48,6 @@ export class LinearArena {
         const nextOffset = alignedOffset + byteSize;
 
         if (nextOffset - this._baseOffset > this._byteCapacity) {
-            // Check if underlying memory can grow
             const requiredBytes = nextOffset - this._memory.byteLength;
             if (requiredBytes > 0) {
                 const pagesNeeded = Math.ceil(requiredBytes / WasmMemory.PAGE_SIZE);
@@ -73,10 +65,16 @@ export class LinearArena {
         return alignedOffset;
     }
 
+    /**
+     * Returns the current allocation offset watermark.
+     */
     public mark(): number {
         return this._currentOffset;
     }
 
+    /**
+     * Restores the allocation offset to a previously recorded watermark.
+     */
     public rewind(mark: number): void {
         if (mark < this._baseOffset || mark > this._currentOffset) {
             throw new Error(`Invalid watermark ${mark}; must be between ${this._baseOffset} and ${this._currentOffset}`);
@@ -84,6 +82,9 @@ export class LinearArena {
         this._currentOffset = mark;
     }
 
+    /**
+     * Resets the allocation offset to the base pointer, recycling all arena memory in O(1) time.
+     */
     public reset(): void {
         this._currentOffset = this._baseOffset;
     }
