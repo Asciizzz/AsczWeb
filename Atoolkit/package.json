@@ -1,32 +1,103 @@
 {
   "name": "@asciiz/atoolkit",
   "version": "0.1.0",
+  "description": "High-performance computational and graphics engineering toolkit for WebGPU, WebAssembly, linear algebra, and ECS.",
   "type": "module",
-  "main": "./index.ts",
-  "types": "./index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./index.ts",
-    "./*": "./*",
-    "./alm": "./alm/index.ts",
-    "./alm/*": "./alm/*",
-    "./awgpu": "./awgpu/index.ts",
-    "./awgpu/*": "./awgpu/*",
-    "./awgpu_old": "./awgpu_old/index.ts",
-    "./awgpu_old/*": "./awgpu_old/*",
-    "./aecs": "./aecs/index.ts",
-    "./aecs/*": "./aecs/*",
-    "./atempo": "./atempo/index.ts",
-    "./atempo/*": "./atempo/*",
-    "./acircuit": "./acircuit/index.ts",
-    "./acircuit/*": "./acircuit/*",
-    "./adiag": "./adiag/index.ts",
-    "./adiag/*": "./adiag/*",
-    "./awasm": "./awasm/index.ts",
-    "./awasm/*": "./awasm/*"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./alm": {
+      "types": "./dist/alm/index.d.ts",
+      "import": "./dist/alm/index.js"
+    },
+    "./alm/*": {
+      "types": "./dist/alm/*.d.ts",
+      "import": "./dist/alm/*.js"
+    },
+    "./awgpu": {
+      "types": "./dist/awgpu/index.d.ts",
+      "import": "./dist/awgpu/index.js"
+    },
+    "./awgpu/*": {
+      "types": "./dist/awgpu/*.d.ts",
+      "import": "./dist/awgpu/*.js"
+    },
+    "./awasm": {
+      "types": "./dist/awasm/index.d.ts",
+      "import": "./dist/awasm/index.js"
+    },
+    "./awasm/*": {
+      "types": "./dist/awasm/*.d.ts",
+      "import": "./dist/awasm/*.js"
+    },
+    "./aecs": {
+      "types": "./dist/aecs/index.d.ts",
+      "import": "./dist/aecs/index.js"
+    },
+    "./aecs/*": {
+      "types": "./dist/aecs/*.d.ts",
+      "import": "./dist/aecs/*.js"
+    },
+    "./atempo": {
+      "types": "./dist/atempo/index.d.ts",
+      "import": "./dist/atempo/index.js"
+    },
+    "./atempo/*": {
+      "types": "./dist/atempo/*.d.ts",
+      "import": "./dist/atempo/*.js"
+    },
+    "./acircuit": {
+      "types": "./dist/acircuit/index.d.ts",
+      "import": "./dist/acircuit/index.js"
+    },
+    "./acircuit/*": {
+      "types": "./dist/acircuit/*.d.ts",
+      "import": "./dist/acircuit/*.js"
+    },
+    "./adiag": {
+      "types": "./dist/adiag/index.d.ts",
+      "import": "./dist/adiag/index.js"
+    },
+    "./adiag/*": {
+      "types": "./dist/adiag/*.d.ts",
+      "import": "./dist/adiag/*.js"
+    },
+    "./awgpu_old": {
+      "types": "./dist/awgpu_old/index.d.ts",
+      "import": "./dist/awgpu_old/index.js"
+    },
+    "./awgpu_old/*": {
+      "types": "./dist/awgpu_old/*.d.ts",
+      "import": "./dist/awgpu_old/*.js"
+    }
   },
   "files": [
-    "**/*.ts",
-    "ReadMe.md"
+    "dist",
+    "ReadMe.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "author": "Asciizzz",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Asciizzz/AsczWeb.git",
+    "directory": "Atoolkit"
+  },
+  "keywords": [
+    "webgpu",
+    "webassembly",
+    "wasm",
+    "graphics",
+    "math",
+    "ecs"
   ],
   "devDependencies": {
     "@webgpu/types": "^0.1.71",
