@@ -16,6 +16,7 @@ All modules share common engineering invariants: zero-allocation calling convent
 | **[`acircuit`](./acircuit/ReadMe.md)** | Directed Computation Circuit | `Socket`, `Wire`, `Chip`, `Circuit`, `Subcircuit` | Kahn topological ordering; execution plan caching (`_cachedPlan`); 1-to-1 input enforcement; 1-to-N output fan-out. | [acircuit ReadMe](./acircuit/ReadMe.md) |
 | **[`awgpu`](./awgpu/ReadMe.md)** | Six-Tier WebGPU Hardware Engine | `Device`, `Buffer`, `BufferPool`, `Texture`, `Sampler`, `StreamSet`, `Target`, `BindLayout`, `BindTable`, `RasterPipeline`, `ComputePipeline`, `PipelineCache`, `RenderPassNode`, `ComputePassNode`, `PassSequence`, `PassGraph` | Zero-allocation render pass descriptors; transient buffer pooling; automated vertex strides; 8-slot bind group filtering; DAG dead pass culling. | [awgpu ReadMe](./awgpu/ReadMe.md) |
 | **[`adiag`](./adiag/ReadMe.md)** | Diagnostic Telemetry Bus | `Bus`, `Result`, causal chain tracers | Fixed-capacity circular ring buffer (default 1000 records); non-throwing diagnostics; pointer-based causal error chains (`ref`). | [adiag ReadMe](./adiag/ReadMe.md) |
+| **[`awasm`](./awasm/ReadMe.md)** | WebAssembly Computational Runtime & Memory Coordinator | `WasmMemory`, `LinearArena`, `BlockPool`, `MemoryView`, `StructLayout`, `Slice`, `StringBuffer`, `ModuleInspector`, `HostBridge`, `ModuleLoader`, `WasmInstance`, `SharedMemory`, `AtomicQueue`, `WorkerPool` | Monotonic bump allocation; detachment-resilient typed views; 16-byte SIMD alignment; intrusive slab recycling; lock-free atomic queues. | [awasm ReadMe](./awasm/ReadMe.md) |
 
 ---
 
@@ -77,6 +78,15 @@ Structured diagnostics and causal error tracing without cross-boundary thrown ex
 - **Structured Records**: `Result` captures category types (`"ok"`, `"err"`, `"warn"`, `"info"`), machine-readable codes, templated messages, arbitrary key-value payloads, and parent error references (`ref`).
 - **Circular History**: `Bus` logs diagnostic records into a pre-allocated circular ring buffer (default 1000 entries) in O(1) time, overwriting oldest records when capacity is reached.
 - **Causal Traversal**: Tracing utilities traverse parent `ref` pointers to extract chronological root cause failure chains across asynchronous subsystem boundaries.
+
+### 2.7 awasm: WebAssembly Computational Runtime & Linear Memory Coordinator
+
+Low-level WebAssembly execution runtime, linear memory arena coordinator, binary inspector, and multi-threaded worker dispatch framework.
+
+- **Memory Subsystem**: `WasmMemory` tracks page growth and notifies listeners when native buffers detach. `LinearArena` provides O(1) bump allocations with 4/8/16-byte alignment and watermark rewinding. `BlockPool` manages intrusive free-list slab recycling. `MemoryView` exposes detachment-resilient typed array views.
+- **ABI Subsystem**: `StructLayout` computes member byte offsets and stride calculations matching C/Rust `repr(C)` specifications. `Slice` encapsulates guest memory spans `(ptr, length)` without buffer duplication. `StringBuffer` provides UTF-8 encoding into arena memory and decoding from guest spans.
+- **Runtime Subsystem**: `ModuleInspector` performs static binary analysis on uninstantiated modules. `HostBridge` constructs typed host import tables with standard timing and panic hooks. `ModuleLoader` compiles modules via streaming or buffered paths with optional IndexedDB bytecode caching. `WasmInstance` manages active instances with dual-tier native handle access.
+- **Thread Subsystem**: `SharedMemory` allocates thread-safe `SharedArrayBuffer` memory with 32-bit atomic wait/notify synchronization. `AtomicQueue` coordinates lock-free message passing via circular ring buffers. `WorkerPool` dispatches tasks across dedicated Web Workers sharing the same compiled module and linear memory.
 
 ---
 

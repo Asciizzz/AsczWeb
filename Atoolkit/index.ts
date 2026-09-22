@@ -4,6 +4,7 @@ import * as Aecs from "./aecs/index.js";
 import * as Adiag from "./adiag/index.js";
 import * as Awgpu from "./awgpu_old/index.js";
 import * as Atempo from "./atempo/index.js";
+import * as Awasm from "./awasm/index.js";
 
 export {
     Acircuit,
@@ -12,4 +13,5 @@ export {
     Adiag,
     Awgpu,
     Atempo,
+    Awasm,
 };

@@ -20,7 +20,9 @@
     "./acircuit": "./acircuit/index.ts",
     "./acircuit/*": "./acircuit/*",
     "./adiag": "./adiag/index.ts",
-    "./adiag/*": "./adiag/*"
+    "./adiag/*": "./adiag/*",
+    "./awasm": "./awasm/index.ts",
+    "./awasm/*": "./awasm/*"
   },
   "files": [
     "**/*.ts",
