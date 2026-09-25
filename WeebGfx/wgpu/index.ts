@@ -3,6 +3,7 @@ export { TextureWGPU } from "./texture.js";
 export {
     ShaderWGPU,
     type ParamBindingsWGPU,
+    type ShaderGroupMetaWGPU,
 } from "./shader.js";
 export {
     MeshRendererWGPU,
@@ -17,4 +18,3 @@ export {
 
 // WebGPU Shader Graph Subsystem
 export * from "./shadergraph/index.js";
-

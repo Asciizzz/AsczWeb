@@ -5,7 +5,13 @@ export type WgslDataType =
     | "vec4<f32>"
     | "mat4x4<f32>"
     | "u32"
+    | "vec2<u32>"
+    | "vec3<u32>"
+    | "vec4<u32>"
     | "i32"
+    | "vec2<i32>"
+    | "vec3<i32>"
+    | "vec4<i32>"
     | "texture_2d<f32>"
     | "sampler"
     | "layout_token";

@@ -18,7 +18,7 @@ export { Camera, type CameraProjectionMode } from "./camera.js";
 export { MeshCmp, ShaderCmp, TransformCmp, SkinCmp, CameraCmp } from "./components.js";
 
 // WebGPU Backend Subsystem (Powered by Atoolkit/awgpu)
-export * as webgpu from "./webgpu/index.js";
+export * as webgpu from "./wgpu/index.js";
 export {
     MeshWGPU,
     TextureWGPU,
@@ -31,4 +31,5 @@ export {
     type RenderOptions,
     type DrawMeshOptions,
     type MeshRendererOptions,
-} from "./webgpu/index.js";
+} from "./wgpu/index.js";
+export * from "./wgpu/shadergraph/index.js";

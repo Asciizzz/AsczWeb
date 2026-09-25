@@ -1,12 +1,18 @@
+import { Texture, Sampler } from "@asciiz/atoolkit/awgpu";
 import { TextureGPU, type TextureCPU } from "../texture.js";
 
 /**
- * WebGPU implementation of TextureGPU holding native GPUTexture, GPUTextureView, and GPUSampler.
+ * WebGPU implementation of TextureGPU holding native GPUTexture, GPUTextureView, and GPUSampler,
+ * with first-class integration with @asciiz/atoolkit/awgpu Texture and Sampler handles.
  */
 export class TextureWGPU extends TextureGPU {
     texture: GPUTexture;
     view: GPUTextureView;
     sampler: GPUSampler;
+
+    // Awgpu managed wrappers for Level 3 binding tables and pass graphs
+    awgpuTexture: Texture;
+    awgpuSampler: Sampler;
 
     constructor(
         width: number,
@@ -21,6 +27,8 @@ export class TextureWGPU extends TextureGPU {
         this.texture = texture;
         this.view = view;
         this.sampler = sampler;
+        this.awgpuTexture = Texture.fromNative(texture, view, "TextureWGPU_Texture");
+        this.awgpuSampler = new Sampler(sampler, "TextureWGPU_Sampler");
     }
 
     /**
@@ -138,4 +146,3 @@ export class TextureWGPU extends TextureGPU {
         this.texture.destroy();
     }
 }
-

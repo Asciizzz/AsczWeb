@@ -1,4 +1,9 @@
-import { RenderPipeline } from "@asciiz/atoolkit/awgpu_old/pipeline.js";
+import {
+    RasterPipeline,
+    BindLayout,
+    BindLayoutBuilder,
+    SlotFrequency,
+} from "@asciiz/atoolkit/awgpu";
 import type {
     VertexLayout,
     VertexAttribute,
@@ -6,7 +11,7 @@ import type {
     ShaderParams,
 } from "../../types.js";
 import { VERTEX_FORMAT_SIZES } from "../../types.js";
-import { ShaderWGPU, type ParamBindingsWGPU } from "../shader.js";
+import { ShaderWGPU, type ParamBindingsWGPU, type ShaderGroupMetaWGPU } from "../shader.js";
 import type { Node, Connection, WgslDataType } from "./types.js";
 import {
     InputVertexNode,
@@ -51,11 +56,16 @@ export interface ShaderSourceWGPU {
     vertexLayout: VertexLayout;
     defaultParams: ShaderParams;
     paramBindings: ParamBindingsWGPU;
+    meta: ShaderGroupMetaWGPU;
 }
 
 /**
  * WebGPU-specific unified shader graph compiler.
- * Directly compiles a vertex-fragment graph into WGSL and instantiates RenderPipeline.
+ * Directly compiles a vertex-fragment graph into WGSL and instantiates modern RasterPipeline.
+ * Uses a frequency-slotted 3-tier binding model:
+ *   Group 0: Frame / Camera uniforms (SlotFrequency.PerFrame)
+ *   Group 1: Material parameters & textures (SlotFrequency.PerBatch)
+ *   Group 2: Entity dynamic transforms (SlotFrequency.PerInstance)
  */
 export class ShaderGraphWGPU {
     nodes: Map<string, Node> = new Map();
@@ -337,15 +347,7 @@ export class ShaderGraphWGPU {
         codeLines.push("};");
         codeLines.push("");
 
-        // Group 0: Frame & Entity Bindings
-        let group0Bindings = 0;
-        if (hasEntityTransform) {
-            codeLines.push("struct EntityUniforms {");
-            codeLines.push("    modelMatrix: mat4x4<f32>,");
-            codeLines.push("    normalMatrix: mat4x4<f32>,");
-            codeLines.push("};");
-            codeLines.push(`@group(0) @binding(${group0Bindings++}) var<uniform> u_entity: EntityUniforms;`);
-        }
+        // Group 0: Frame & Camera Uniforms (SlotFrequency.PerFrame)
         if (hasCamera) {
             codeLines.push("struct CameraUniforms {");
             codeLines.push("    viewMatrix: mat4x4<f32>,");
@@ -354,11 +356,11 @@ export class ShaderGraphWGPU {
             codeLines.push("    cameraPosition: vec3<f32>,");
             codeLines.push("    _pad: f32,");
             codeLines.push("};");
-            codeLines.push(`@group(0) @binding(${group0Bindings++}) var<uniform> u_camera: CameraUniforms;`);
+            codeLines.push("@group(0) @binding(0) var<uniform> u_camera: CameraUniforms;");
+            codeLines.push("");
         }
-        codeLines.push("");
 
-        // Group 1: Material & Parameter Bindings
+        // Group 1: Material & Parameter Bindings (SlotFrequency.PerBatch)
         let group1Bindings = 0;
         const hasMaterialUniform = paramFloats.length > 0 || paramVec4s.length > 0;
         if (hasMaterialUniform) {
@@ -379,7 +381,19 @@ export class ShaderGraphWGPU {
         for (const smp of paramSamplers) {
             codeLines.push(`@group(1) @binding(${group1Bindings++}) var u_${smp.paramName}: sampler;`);
         }
-        codeLines.push("");
+        if (group1Bindings > 0) {
+            codeLines.push("");
+        }
+
+        // Group 2: Entity Transform Uniforms (SlotFrequency.PerInstance with dynamic offset)
+        if (hasEntityTransform) {
+            codeLines.push("struct EntityUniforms {");
+            codeLines.push("    modelMatrix: mat4x4<f32>,");
+            codeLines.push("    normalMatrix: mat4x4<f32>,");
+            codeLines.push("};");
+            codeLines.push("@group(2) @binding(0) var<uniform> u_entity: EntityUniforms;");
+            codeLines.push("");
+        }
 
         const getNodeOutputExpr = (nodeId: string, socketId: string): string => {
             const fromNode = this.nodes.get(nodeId);
@@ -539,11 +553,21 @@ export class ShaderGraphWGPU {
             samplers: paramSamplers.map((s) => s.paramName),
         };
 
+        const meta: ShaderGroupMetaWGPU = {
+            hasCamera,
+            hasMaterial: hasMaterialUniform || paramTextures.length > 0 || paramSamplers.length > 0,
+            hasEntityTransform,
+            cameraGroupIndex: 0,
+            materialGroupIndex: 1,
+            entityGroupIndex: 2,
+        };
+
         return {
             wgslCode: codeLines.join("\n"),
             vertexLayout: layout,
             defaultParams,
             paramBindings,
+            meta,
         };
     }
 
@@ -601,7 +625,7 @@ export class ShaderGraphWGPU {
     }
 
     /**
-     * Compiles the graph into a ShaderWGPU pipeline utilizing Atoolkit/awgpu.
+     * Compiles the graph into a ShaderWGPU pipeline utilizing Atoolkit/awgpu RasterPipeline.
      */
     compile(
         device: GPUDevice,
@@ -612,7 +636,7 @@ export class ShaderGraphWGPU {
             blend?: GPUBlendState;
         } = {}
     ): ShaderWGPU {
-        const { wgslCode, vertexLayout, defaultParams, paramBindings } = this.generateShaderSource();
+        const { wgslCode, vertexLayout, defaultParams, paramBindings, meta } = this.generateShaderSource();
         const targetFormat = options.targetFormat ?? "bgra8unorm";
 
         // Derive WebGPU VertexBufferLayout
@@ -626,74 +650,52 @@ export class ShaderGraphWGPU {
             })),
         };
 
-        const hasEntityUniform = wgslCode.includes("u_entity");
-        const hasCameraUniform = wgslCode.includes("u_camera") || wgslCode.includes("u_viewProj");
-        const hasMaterialUniform = wgslCode.includes("u_material");
+        const bindLayouts: BindLayout[] = [];
 
-        const bindGroupLayouts: GPUBindGroupLayout[] = [];
-
-        // Group 0: Frame / Entity Uniforms
-        const group0Entries: GPUBindGroupLayoutEntry[] = [];
-        let b0 = 0;
-        if (hasEntityUniform) {
-            group0Entries.push({
-                binding: b0++,
-                visibility: STAGE_VERTEX,
-                buffer: { type: "uniform" },
-            });
+        // Group 0: Frame / Camera Uniforms (SlotFrequency.PerFrame)
+        if (meta.hasCamera) {
+            const cameraLayout = BindLayout.builder()
+                .addUniform(0, STAGE_VERTEX | STAGE_FRAGMENT, { minBindingSize: 208 })
+                .build(device, "WeebGfx_Group0_CameraLayout");
+            bindLayouts.push(cameraLayout);
+        } else {
+            // Empty placeholder for slot 0 if unused but higher slots exist
+            bindLayouts.push(BindLayout.builder().build(device, "WeebGfx_Group0_EmptyLayout"));
         }
-        if (hasCameraUniform) {
-            group0Entries.push({
-                binding: b0++,
-                visibility: STAGE_VERTEX | STAGE_FRAGMENT,
-                buffer: { type: "uniform" },
-            });
-        }
-        bindGroupLayouts.push(
-            device.createBindGroupLayout({
-                label: "WeebGfx_WebGPU_Group0_Layout",
-                entries: group0Entries,
-            })
-        );
 
-        // Group 1: Material Parameters
-        const group1Entries: GPUBindGroupLayoutEntry[] = [];
+        // Group 1: Material Parameters (SlotFrequency.PerBatch)
+        const matBuilder = BindLayout.builder();
         let b1 = 0;
-        if (hasMaterialUniform) {
-            group1Entries.push({
-                binding: b1++,
-                visibility: STAGE_VERTEX | STAGE_FRAGMENT,
-                buffer: { type: "uniform" },
-            });
+        if (paramBindings.hasMaterialUniform) {
+            const numFloats = paramBindings.floats.length;
+            const numVecs = paramBindings.vectors.length;
+            const totalFloats = numFloats + numVecs * 4;
+            const byteSize = Math.max(16, Math.ceil((totalFloats * 4) / 16) * 16);
+            matBuilder.addUniform(b1++, STAGE_VERTEX | STAGE_FRAGMENT, { minBindingSize: byteSize });
         }
-
         for (let i = 0; i < paramBindings.textures.length; i++) {
-            group1Entries.push({
-                binding: b1++,
-                visibility: STAGE_VERTEX | STAGE_FRAGMENT,
-                texture: { sampleType: "float" },
-            });
+            matBuilder.addTexture(b1++, STAGE_VERTEX | STAGE_FRAGMENT);
         }
-
         for (let i = 0; i < paramBindings.samplers.length; i++) {
-            group1Entries.push({
-                binding: b1++,
-                visibility: STAGE_VERTEX | STAGE_FRAGMENT,
-                sampler: { type: "filtering" },
-            });
+            matBuilder.addSampler(b1++, STAGE_VERTEX | STAGE_FRAGMENT);
+        }
+        const materialLayout = matBuilder.build(device, "WeebGfx_Group1_MaterialLayout");
+        bindLayouts.push(materialLayout);
+
+        // Group 2: Entity Transform Uniforms (SlotFrequency.PerInstance with dynamic offset)
+        if (meta.hasEntityTransform) {
+            const entityLayout = BindLayout.builder()
+                .addUniform(0, STAGE_VERTEX, { hasDynamicOffset: true, minBindingSize: 128 })
+                .build(device, "WeebGfx_Group2_EntityLayout");
+            bindLayouts.push(entityLayout);
         }
 
-        bindGroupLayouts.push(
-            device.createBindGroupLayout({
-                label: "WeebGfx_WebGPU_Group1_Layout",
-                entries: group1Entries,
-            })
-        );
+        const rawBindGroupLayouts = bindLayouts.map((l) => l.native);
 
-        // Instantiate pipeline via RenderPipeline from Atoolkit/awgpu
-        const awgpuPipeline = RenderPipeline.create(device, {
-            label: "WeebGfx_Pipeline",
-            bindGroupLayouts,
+        // Instantiate pipeline via RasterPipeline from Atoolkit/awgpu
+        const rasterPipeline = RasterPipeline.create(device, {
+            label: "WeebGfx_RasterPipeline",
+            layouts: bindLayouts,
             vertex: {
                 code: wgslCode,
                 entryPoint: "vs_main",
@@ -717,7 +719,15 @@ export class ShaderGraphWGPU {
                 : undefined,
         });
 
-        return new ShaderWGPU(awgpuPipeline, bindGroupLayouts, wgslCode, defaultParams, paramBindings);
+        return new ShaderWGPU(
+            rasterPipeline,
+            rawBindGroupLayouts,
+            wgslCode,
+            defaultParams,
+            paramBindings,
+            meta,
+            bindLayouts
+        );
     }
 
     private _formatToWGSL(format: VertexFormat): string {
@@ -747,4 +757,3 @@ export class ShaderGraphWGPU {
         }
     }
 }
-
