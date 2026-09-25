@@ -442,7 +442,20 @@ export class ShaderGraphWGPU {
         const getExpr = (toNodeId: string, toSocketId: string, currentStage: "vertex" | "fragment"): string => {
             const conn = this.connections.find((c) => c.toNodeId === toNodeId && c.toSocketId === toSocketId);
             if (!conn) {
-                return "vec4<f32>(1.0, 1.0, 1.0, 1.0)";
+                const targetNode = this.nodes.get(toNodeId);
+                const socket = targetNode?.inputs.find((s) => s.id === toSocketId);
+                switch (socket?.dataType) {
+                    case "f32":
+                        return "0.0";
+                    case "vec2<f32>":
+                        return "vec2<f32>(0.0, 0.0)";
+                    case "vec3<f32>":
+                        return "vec3<f32>(0.0, 0.0, 0.0)";
+                    case "vec4<f32>":
+                        return "vec4<f32>(1.0, 1.0, 1.0, 1.0)";
+                    default:
+                        return "vec4<f32>(1.0, 1.0, 1.0, 1.0)";
+                }
             }
 
             const fromNode = this.nodes.get(conn.fromNodeId);
@@ -468,9 +481,14 @@ export class ShaderGraphWGPU {
         for (const node of vertexNodes) {
             if (node instanceof EntityTransformNode) {
                 const inPos = getExpr(node.id, "in_position", "vertex");
-                const inNorm = getExpr(node.id, "in_normal", "vertex");
                 codeLines.push(`    let ${node.id}_pos = (u_entity.modelMatrix * vec4<f32>(${inPos}, 1.0)).xyz;`);
-                codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * vec4<f32>(${inNorm}, 0.0)).xyz;`);
+                const hasNormConn = this.connections.some((c) => c.toNodeId === node.id && c.toSocketId === "in_normal");
+                if (hasNormConn) {
+                    const inNorm = getExpr(node.id, "in_normal", "vertex");
+                    codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * vec4<f32>(${inNorm}, 0.0)).xyz;`);
+                } else {
+                    codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz;`);
+                }
             } else if (node instanceof MultiplyNode) {
                 const a = getExpr(node.id, "a", "vertex");
                 const b = getExpr(node.id, "b", "vertex");
@@ -717,6 +735,13 @@ export class ShaderGraphWGPU {
                       depthCompare: "less-equal",
                   }
                 : undefined,
+            onShaderMessage: (msg) => {
+                if (msg.type === "error") {
+                    console.error(`[ShaderGraphWGPU Error] ${msg.stage} line ${msg.lineNum}:${msg.linePos}: ${msg.message}`);
+                } else if (msg.type === "warning") {
+                    console.warn(`[ShaderGraphWGPU Warning] ${msg.stage} line ${msg.lineNum}:${msg.linePos}: ${msg.message}`);
+                }
+            },
         });
 
         return new ShaderWGPU(
