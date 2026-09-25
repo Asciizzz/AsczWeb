@@ -6,6 +6,7 @@
     "WeebGfx"
   ],
   "scripts": {
+    "dev": "vite",
     "typecheck": "tsc --noEmit",
     "yalc:publish": "cd Atoolkit && npx yalc publish && cd ../WeebGfx && npx yalc publish",
     "yalc:push": "cd Atoolkit && npx yalc push && cd ../WeebGfx && npx yalc push"
