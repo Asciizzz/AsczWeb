@@ -187,7 +187,7 @@ export class MeshRendererWGPU {
 
     /**
      * Executes draw calls across iterable of Actors inside render pass.
-     * Groups draws by camera, shader pipeline, and mesh to minimize GPU state switches.
+     * Groups draws by shader pipeline and mesh to minimize GPU state switches.
      */
     render(
         targetOrOptions: RenderOptions | RenderTarget,
@@ -197,7 +197,7 @@ export class MeshRendererWGPU {
         const options = targetOrOptions as RenderOptions;
 
         const pass = target.pass;
-        const defaultCamera = target.camera;
+        const camera = target.camera;
         const device = target.device ?? this.device;
 
         if (!pass) {
@@ -205,7 +205,7 @@ export class MeshRendererWGPU {
                 "[MeshRendererWGPU] Render pass was not provided. Pass valid GPURenderPassEncoder in options: { pass, ... }."
             );
         }
-        if (!defaultCamera) {
+        if (!camera) {
             throw new Error(
                 "[MeshRendererWGPU] Camera was not provided. Pass valid Camera instance in options: { camera, ... }."
             );
@@ -233,12 +233,8 @@ export class MeshRendererWGPU {
 
         if (count === 0) return;
 
-        // 2. State sorting to minimize camera, pipeline, and mesh switches
+        // 2. State sorting to minimize pipeline and mesh switches
         activeActors.sort((a, b) => {
-            const camA = getStateId(a.camera);
-            const camB = getStateId(b.camera);
-            if (camA !== camB) return camA - camB;
-
             const sA = a.shaders[0];
             const sB = b.shaders[0];
             const pipeA = getStateId(sA instanceof ShaderWGPU ? sA.pipeline.native : sA);
@@ -306,12 +302,14 @@ export class MeshRendererWGPU {
         // Upload packed instances in single transfer
         this._instanceBuffer.write(device, this._instanceStaging.subarray(0, totalFloats), 0);
 
-        // 5. Render loop with state filtering and per-Actor camera override
+        // 5. Update pass camera buffer once
+        this._updateCameraBuffer(device, camera);
+
+        // 6. Render loop with state filtering
         let lastBoundPipeline: GPURenderPipeline | undefined;
         let lastBoundMesh: MeshWGPU | undefined;
         let lastBoundMaterial: BindTable | undefined;
         let lastBoundCameraTable: BindTable | undefined;
-        let currentBoundCamera: Camera | undefined;
 
         for (let i = 0; i < count; i++) {
             const actor = activeActors[i];
@@ -319,14 +317,6 @@ export class MeshRendererWGPU {
             const submeshes = mesh.submeshes;
             const dynamicOffset = actorOffsets[i];
             const instanceCount = Math.max(1, actor.instances.count);
-            const effectiveCamera = actor.camera ?? defaultCamera;
-
-            // Camera update (Slot 0): check if camera changed
-            if (currentBoundCamera !== effectiveCamera) {
-                this._updateCameraBuffer(device, effectiveCamera);
-                currentBoundCamera = effectiveCamera;
-                lastBoundCameraTable = undefined; // Force camera bind table re-evaluation
-            }
 
             // Bind vertex and index buffers once per mesh
             if (lastBoundMesh !== mesh) {
@@ -349,6 +339,7 @@ export class MeshRendererWGPU {
                 if (lastBoundPipeline !== shader.pipeline.native) {
                     pass.setPipeline(shader.pipeline.native);
                     lastBoundPipeline = shader.pipeline.native;
+                    lastBoundCameraTable = undefined;
                 }
 
                 // Check layout architecture: multi-group vs combined legacy 2-group
@@ -359,7 +350,7 @@ export class MeshRendererWGPU {
                     const legacyGroup0 = this._createLegacyGroup0(
                         device,
                         shader,
-                        effectiveCamera,
+                        camera,
                         actor.transform,
                         actor.normalMatrix
                     );
@@ -367,10 +358,12 @@ export class MeshRendererWGPU {
                 } else {
                     // Slot 0: Camera (PerFrame)
                     if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
-                        const cameraTable = this._getCameraBindTable(device, shader);
-                        if (cameraTable && lastBoundCameraTable !== cameraTable) {
-                            pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
-                            lastBoundCameraTable = cameraTable;
+                        if (!lastBoundCameraTable) {
+                            const cameraTable = this._getCameraBindTable(device, shader);
+                            if (cameraTable) {
+                                pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
+                                lastBoundCameraTable = cameraTable;
+                            }
                         }
                     }
 

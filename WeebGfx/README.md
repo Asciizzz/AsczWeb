@@ -16,7 +16,7 @@ WeebGfx provides two operational layers:
 
 ### Actor
 
-`Actor` is the atomic draw item in WeebGfx. It holds hardware resources, unified instance transforms, optional camera overrides, and skeletal skinning data. Instancing is the default state: a single object is treated as 1 instance.
+`Actor` is the atomic draw item in WeebGfx. It holds hardware resources, unified instance transforms, and skeletal skinning data. Instancing is the default state: a single object is treated as 1 instance.
 
 ```typescript
 import { Actor } from "@asciiz/weebgfx";
@@ -26,7 +26,6 @@ const actor = new Actor({
     mesh: meshWgpu,
     shaders: shaderWgpu,
     transform: worldMatrix,
-    camera: customCamera,
 });
 
 // Multi-instance batch (N instances):
@@ -45,7 +44,6 @@ const batchActor = new Actor({
 - `transform`: Getter/setter for the world transformation matrix of instance 0.
 - `normalMatrix`: Getter/setter for the normal transformation matrix of instance 0.
 - `instanceCount`: Number of instances to dispatch. Defaults to 1 for single objects.
-- `camera`: Optional `Camera` override. When set, renderer switches camera uniforms for this actor's draw call.
 - `skin`: Optional skeletal joint matrices (`Float32Array`) and joint count.
 - **Instanced Skinning Rule**: When an actor specifies both multiple instances and skinning data, all instances share the identical skeletal pose in synchronized space.
 
@@ -129,9 +127,9 @@ renderer.render({ pass, camera }, [actor1, actor2, actor3]);
 ```
 
 - `submit(actor)`: Queues actor into internal draw list without immediate GPU dispatch.
-- `flush(target)`: Sorts queued draws by camera, pipeline, and mesh to minimize GPU state transitions, executes draw commands, and resets queue.
+- `flush(target)`: Sorts queued draws by pipeline and mesh to minimize GPU state transitions, executes draw commands, and resets queue.
 - `target.pass`: Active `GPURenderPassEncoder`.
-- `target.camera`: Default camera used for draw calls unless overridden by `actor.camera`.
+- `target.camera`: Camera used for draw calls in the render pass.
 - `target.device`: Optional `GPUDevice` if not provided during renderer construction.
 
 ---

@@ -1,7 +1,6 @@
 import type { MeshGPU } from "./mesh.js";
 import type { ShaderGPU } from "./shader.js";
 import type { ShaderParams } from "./types.js";
-import type { Camera } from "./camera.js";
 
 export interface SkinData {
     jointMatrices: Float32Array;
@@ -38,9 +37,6 @@ export interface ActorOptions {
     /** Optional 4x4 normal matrix for single instance */
     normalMatrix?: Float32Array | ArrayLike<number>;
 
-    /** Optional camera override */
-    camera?: Camera;
-
     /** Optional skeletal skinning joint matrices */
     skin?: SkinData | Float32Array;
 
@@ -63,13 +59,12 @@ const IDENTITY_MAT4 = new Float32Array([
 
 /**
  * Atomic draw item holding mesh, shaders, material parameters, instance transforms,
- * optional camera override, and skeletal skinning data.
+ * and skeletal skinning data.
  */
 export class Actor {
     mesh: MeshGPU;
     shaders: (ShaderGPU | null)[];
     params: ShaderParams[];
-    camera?: Camera;
     skin?: SkinData;
     morph?: MorphData;
 
@@ -142,8 +137,6 @@ export class Actor {
                     count: opts.instanceCount ?? 1,
                 };
             }
-
-            this.camera = opts.camera;
 
             if (opts.skin) {
                 if (opts.skin instanceof Float32Array) {
@@ -294,14 +287,6 @@ export class Actor {
      */
     setParams(params: ShaderParams, submeshIndex = 0): this {
         this.params[submeshIndex] = params;
-        return this;
-    }
-
-    /**
-     * Sets camera override.
-     */
-    setCamera(camera?: Camera): this {
-        this.camera = camera;
         return this;
     }
 
