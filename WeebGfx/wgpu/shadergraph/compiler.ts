@@ -32,7 +32,7 @@ import {
     Vec4Node,
     TextureNode,
     SamplerNode,
-} from "./nodes.js";
+} from "./nodes/index.js";
 
 const STAGE_VERTEX = typeof GPUShaderStage !== "undefined" ? GPUShaderStage.VERTEX : 1;
 const STAGE_FRAGMENT = typeof GPUShaderStage !== "undefined" ? GPUShaderStage.FRAGMENT : 2;
