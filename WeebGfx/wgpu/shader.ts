@@ -17,12 +17,17 @@ export interface ParamBindingsWGPU {
 export interface ShaderGroupMetaWGPU {
     cameraGroupIndex?: number;
     materialGroupIndex?: number;
-    entityGroupIndex?: number;
+    instanceGroupIndex?: number;
     skinGroupIndex?: number;
     hasCamera: boolean;
     hasMaterial: boolean;
-    hasEntityTransform: boolean;
+    hasTransform: boolean;
     hasSkin: boolean;
+
+    /** Backward compatibility alias for instanceGroupIndex. */
+    entityGroupIndex?: number;
+    /** Backward compatibility alias for hasTransform. */
+    hasEntityTransform?: boolean;
 }
 
 /**
@@ -51,14 +56,20 @@ export class ShaderWGPU extends ShaderGPU {
         this.wgslCode = wgslCode;
         this.paramBindings = paramBindings;
         this.bindLayouts = bindLayouts;
+
+        const instanceGroupIndex = meta?.instanceGroupIndex ?? meta?.entityGroupIndex ?? 2;
+        const hasTransform = meta?.hasTransform ?? meta?.hasEntityTransform ?? (wgslCode.includes("u_instances") || wgslCode.includes("InstanceData") || wgslCode.includes("u_entity") || wgslCode.includes("EntityUniforms"));
+
         this.meta = {
             hasCamera: meta?.hasCamera ?? (wgslCode.includes("u_camera") || wgslCode.includes("CameraUniforms")),
             hasMaterial: meta?.hasMaterial ?? (wgslCode.includes("u_material") || (paramBindings && (paramBindings.hasMaterialUniform || paramBindings.textures.length > 0 || paramBindings.samplers.length > 0)) || false),
-            hasEntityTransform: meta?.hasEntityTransform ?? (wgslCode.includes("u_instances") || wgslCode.includes("InstanceData") || wgslCode.includes("u_entity") || wgslCode.includes("EntityUniforms")),
+            hasTransform,
+            hasEntityTransform: hasTransform,
             hasSkin: meta?.hasSkin ?? (wgslCode.includes("u_skin") || wgslCode.includes("SkinUniforms")),
             cameraGroupIndex: meta?.cameraGroupIndex ?? 0,
             materialGroupIndex: meta?.materialGroupIndex ?? 1,
-            entityGroupIndex: meta?.entityGroupIndex ?? 2,
+            instanceGroupIndex,
+            entityGroupIndex: instanceGroupIndex,
             skinGroupIndex: meta?.skinGroupIndex ?? 3,
         };
     }

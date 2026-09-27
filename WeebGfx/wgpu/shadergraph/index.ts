@@ -3,6 +3,7 @@ export {
     InputVertexNode,
     OutputVertexNode,
     OutputFragmentNode,
+    WorldTransformNode,
     EntityTransformNode,
     SkinTransformNode,
     FloatNode,

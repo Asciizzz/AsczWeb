@@ -17,6 +17,7 @@ import {
     InputVertexNode,
     OutputVertexNode,
     OutputFragmentNode,
+    WorldTransformNode,
     EntityTransformNode,
     SkinTransformNode,
     SampleTextureNode,
@@ -62,10 +63,11 @@ export interface ShaderSourceWGPU {
 
 /**
  * Compiles a vertex-fragment node graph into WGSL source and initializes RasterPipeline.
- * Uses a three-frequency binding layout:
+ * Uses a four-frequency binding layout:
  * - Group 0: Frame and camera uniforms (PerFrame).
  * - Group 1: Material parameters and textures (PerBatch).
- * - Group 2: Entity dynamic transforms (PerInstance).
+ * - Group 2: Instance storage buffer transforms (PerInstance).
+ * - Group 3: Skeletal joint uniform array (PerInstance).
  */
 export class ShaderGraphWGPU {
     nodes: Map<string, Node> = new Map();
@@ -190,7 +192,7 @@ export class ShaderGraphWGPU {
         // Trace backward from OutputVertex
         const vertexQueue: string[] = [];
         for (const n of this.nodes.values()) {
-            if (n.type === "OutputVertex" || n.type === "InputVertex" || n.type === "EntityTransform" || n.type === "SkinTransform") {
+            if (n.type === "OutputVertex" || n.type === "InputVertex" || n.type === "WorldTransform" || n.type === "EntityTransform" || n.type === "SkinTransform") {
                 vertexQueue.push(n.id);
                 nodeStages.set(n.id, "vertex");
             }
@@ -257,7 +259,8 @@ export class ShaderGraphWGPU {
         }
 
         const hasSkin = Array.from(this.nodes.values()).some((n) => n.type === "SkinTransform");
-        const hasEntityTransform = hasSkin || Array.from(this.nodes.values()).some((n) => n.type === "EntityTransform");
+        const hasTransform = hasSkin || Array.from(this.nodes.values()).some((n) => n.type === "WorldTransform" || n.type === "EntityTransform");
+        const hasEntityTransform = hasTransform;
         const hasCamera = Array.from(this.nodes.values()).some(
             (n) => n instanceof CameraNode || n instanceof UniformMatrixNode
         );
@@ -387,7 +390,7 @@ export class ShaderGraphWGPU {
         }
 
         // Group 2: Instance Transform Storage Buffer (SlotFrequency.PerInstance)
-        if (hasEntityTransform) {
+        if (hasTransform) {
             codeLines.push("struct InstanceData {");
             codeLines.push("    modelMatrix: mat4x4<f32>,");
             codeLines.push("    normalMatrix: mat4x4<f32>,");
@@ -412,7 +415,7 @@ export class ShaderGraphWGPU {
             if (fromNode instanceof InputVertexNode) {
                 return `in.${fromNode.attributeName}`;
             }
-            if (fromNode instanceof EntityTransformNode || fromNode instanceof SkinTransformNode) {
+            if (fromNode instanceof WorldTransformNode || fromNode instanceof SkinTransformNode) {
                 return socketId === "out_position" ? `${fromNode.id}_pos` : `${fromNode.id}_norm`;
             }
             if (fromNode instanceof FloatNode) {
@@ -489,7 +492,7 @@ export class ShaderGraphWGPU {
 
         const vertexNodes = this._getTopologicalStageNodes("vertex", nodeStages);
         for (const node of vertexNodes) {
-            if (node instanceof EntityTransformNode) {
+            if (node instanceof WorldTransformNode) {
                 const inPos = getExpr(node.id, "in_position", "vertex");
                 codeLines.push(`    let ${node.id}_pos = (u_instances[instance_idx].modelMatrix * vec4<f32>(${inPos}, 1.0)).xyz;`);
                 const hasNormConn = this.connections.some((c) => c.toNodeId === node.id && c.toSocketId === "in_normal");
@@ -531,7 +534,7 @@ export class ShaderGraphWGPU {
                 const b = getExpr(node.id, "b", "vertex");
                 const connB = this.connections.find((c) => c.toNodeId === node.id && c.toSocketId === "b");
                 const fromB = connB ? this.nodes.get(connB.fromNodeId) : undefined;
-                const isBVec3 = fromB && (fromB instanceof EntityTransformNode || fromB instanceof SkinTransformNode || (fromB instanceof InputVertexNode && fromB.dataType === "vec3<f32>"));
+                const isBVec3 = fromB && (fromB instanceof WorldTransformNode || fromB instanceof SkinTransformNode || (fromB instanceof InputVertexNode && fromB.dataType === "vec3<f32>"));
                 if (isBVec3 && node.dataType === "vec4<f32>") {
                     codeLines.push(`    let ${node.id}_out = ${a} * vec4<f32>(${b}, 1.0);`);
                 } else {
@@ -611,10 +614,12 @@ export class ShaderGraphWGPU {
         const meta: ShaderGroupMetaWGPU = {
             hasCamera,
             hasMaterial: hasMaterialUniform || paramTextures.length > 0 || paramSamplers.length > 0,
-            hasEntityTransform,
+            hasTransform,
+            hasEntityTransform: hasTransform,
             hasSkin,
             cameraGroupIndex: 0,
             materialGroupIndex: 1,
+            instanceGroupIndex: 2,
             entityGroupIndex: 2,
             skinGroupIndex: 3,
         };
@@ -740,11 +745,11 @@ export class ShaderGraphWGPU {
         bindLayouts.push(materialLayout);
 
         // Group 2: Instance Transform Storage Buffer (SlotFrequency.PerInstance with dynamic offset)
-        if (meta.hasEntityTransform) {
-            const entityLayout = BindLayout.builder()
+        if (meta.hasTransform) {
+            const instanceLayout = BindLayout.builder()
                 .addStorage(0, STAGE_VERTEX, { readOnly: true, hasDynamicOffset: true, minBindingSize: 128 })
                 .build(device, "WeebGfx_Group2_InstanceLayout");
-            bindLayouts.push(entityLayout);
+            bindLayouts.push(instanceLayout);
         }
 
         // Group 3: Skinning Joint Uniforms (SlotFrequency.PerInstance)

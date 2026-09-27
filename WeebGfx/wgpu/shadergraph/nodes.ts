@@ -109,17 +109,17 @@ export class OutputFragmentNode implements Node {
 }
 
 /**
- * Automatically reads entity TransformCmp (model and normal matrices).
+ * Transforms local vertex position and normal to world space using instance matrices.
  */
-export class EntityTransformNode implements Node {
+export class WorldTransformNode implements Node {
     id: string;
-    type = "EntityTransform";
+    type = "WorldTransform";
     stage: "vertex" = "vertex";
 
     inputs: Socket[];
     outputs: Socket[];
 
-    constructor(id = "entity_transform") {
+    constructor(id = "world_transform") {
         this.id = id;
         this.inputs = [
             { id: "in_position", name: "in_position", dataType: "vec3<f32>", isInput: true },
@@ -131,6 +131,9 @@ export class EntityTransformNode implements Node {
         ];
     }
 }
+
+/** Backward compatibility alias for WorldTransformNode. */
+export const EntityTransformNode = WorldTransformNode;
 
 /**
  * Transforms vertex position and normal using weighted skeletal joint matrices.
@@ -161,7 +164,7 @@ export class SkinTransformNode implements Node {
 /**
  * Scalar float value or parameter node.
  * When isParam is true (default), the value acts as the fallback default
- * when no float value is provided in the entity's ShaderCmp slot.
+ * when no float value is provided in the Actor's material params.
  */
 export class FloatNode implements Node {
     id: string;
@@ -250,7 +253,7 @@ export class Vec3Node implements Node {
 /**
  * 4-component vector node representing vector or color data.
  * When isParam is true (default), the value acts as the fallback default
- * when no vector value is provided in the entity's ShaderCmp slot.
+ * when no vector value is provided in the Actor's material params.
  */
 export class Vec4Node implements Node {
     id: string;
@@ -282,7 +285,7 @@ export class Vec4Node implements Node {
 /**
  * 2D Texture node.
  * Paramable by default. If defaultValue is provided, it acts as the fallback default
- * when no texture is specified in the entity's ShaderCmp slot.
+ * when no texture is specified in the Actor's material params.
  */
 export class TextureNode implements Node {
     id: string;
@@ -313,7 +316,7 @@ export class TextureNode implements Node {
 /**
  * Sampler node.
  * Paramable by default. If defaultValue is provided, it acts as the fallback default
- * when no sampler is specified in the entity's ShaderCmp slot.
+ * when no sampler is specified in the Actor's material params.
  */
 export class SamplerNode implements Node {
     id: string;

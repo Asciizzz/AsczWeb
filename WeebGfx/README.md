@@ -16,7 +16,7 @@ WeebGfx provides two operational layers:
 
 ### Actor
 
-`Actor` is the atomic draw item in WeebGfx. It holds hardware resources, unified instance transforms, optional camera overrides, and skeletal skinning data. Instancing is the default state: a single entity is treated as 1 instance.
+`Actor` is the atomic draw item in WeebGfx. It holds hardware resources, unified instance transforms, optional camera overrides, and skeletal skinning data. Instancing is the default state: a single object is treated as 1 instance.
 
 ```typescript
 import { Actor } from "@asciiz/weebgfx";
@@ -144,7 +144,7 @@ renderer.render({ pass, camera }, [actor1, actor2, actor3]);
 import {
     ShaderGraphWGPU,
     InputVertexNode,
-    EntityTransformNode,
+    WorldTransformNode,
     CameraNode,
     MultiplyNode,
     OutputVertexNode,
@@ -157,7 +157,7 @@ const inPos = new InputVertexNode("in_pos", "position", "float32x3");
 const inCol = new InputVertexNode("in_col", "color", "float32x4");
 graph.chainVertexInputs(inPos, inCol);
 
-const txNode = new EntityTransformNode("tx");
+const txNode = new WorldTransformNode("tx");
 const camNode = new CameraNode("cam");
 const mvpNode = new MultiplyNode("mvp", "vec4<f32>");
 const outV = new OutputVertexNode("out_v");
@@ -185,7 +185,7 @@ const shader = graph.compile(device, {
 });
 ```
 
-- `EntityTransformNode`: Automatically handles world matrix multiplication. Shaders compile identically for 1 instance or 10,000 instances via `@builtin(instance_index)`.
+- `WorldTransformNode`: Automatically handles world matrix multiplication. Shaders compile identically for 1 instance or 10,000 instances via `@builtin(instance_index)`.
 - `SkinTransformNode`: Deforms local vertex positions and normals according to weighted joint indices against the Group 3 joint array.
 - `chainVertexInputs()`: Links sequential vertex inputs into a unified `VertexLayout` descriptor.
 - `compile()`: Topologically sorts graph nodes, analyzes cross-stage data routing (auto-varyings), extracts uniform parameter bindings, compiles WGSL source, and allocates the underlying `RasterPipeline`.

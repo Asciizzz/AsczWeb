@@ -351,11 +351,11 @@ export class MeshRendererWGPU {
                     lastBoundPipeline = shader.pipeline.native;
                 }
 
-                // Check layout architecture: 3-group vs combined 2-group
-                const isLegacyLayout = shader.meta.entityGroupIndex === shader.meta.cameraGroupIndex;
+                // Check layout architecture: multi-group vs combined legacy 2-group
+                const isLegacyLayout = (shader.meta.instanceGroupIndex ?? shader.meta.entityGroupIndex) === shader.meta.cameraGroupIndex;
 
                 if (isLegacyLayout) {
-                    // Combined Group 0: Entity and Camera
+                    // Combined Group 0: Instance Transform and Camera
                     const legacyGroup0 = this._createLegacyGroup0(
                         device,
                         shader,
@@ -375,11 +375,11 @@ export class MeshRendererWGPU {
                     }
 
                     // Slot 2: Instance Transform Storage Buffer (PerInstance dynamic offset)
-                    if (shader.meta.hasEntityTransform && shader.bindGroupLayouts.length > 2) {
+                    if (shader.meta.hasTransform && shader.bindGroupLayouts.length > 2) {
                         const instanceTable = this._getInstanceBindTable(device, shader);
                         if (instanceTable) {
                             pass.setBindGroup(
-                                shader.meta.entityGroupIndex ?? 2,
+                                shader.meta.instanceGroupIndex ?? 2,
                                 instanceTable.native,
                                 [dynamicOffset]
                             );
@@ -469,7 +469,7 @@ export class MeshRendererWGPU {
 
         pass.setPipeline(shader.pipeline.native);
 
-        const isLegacyLayout = shader.meta.entityGroupIndex === shader.meta.cameraGroupIndex;
+        const isLegacyLayout = (shader.meta.instanceGroupIndex ?? shader.meta.entityGroupIndex) === shader.meta.cameraGroupIndex;
 
         if (isLegacyLayout) {
             const legacyGroup0 = this._createLegacyGroup0(
@@ -491,7 +491,7 @@ export class MeshRendererWGPU {
             }
 
             // Instance Transform (Slot 2)
-            if (shader.meta.hasEntityTransform && shader.bindGroupLayouts.length > 2) {
+            if (shader.meta.hasTransform && shader.bindGroupLayouts.length > 2) {
                 if (!this._instanceBuffer || this._instanceBuffer.size < 256) {
                     this._instanceBuffer?.destroy();
                     this._instanceBuffer = Buffer.create(device, {
@@ -509,7 +509,7 @@ export class MeshRendererWGPU {
 
                 const instanceTable = this._getInstanceBindTable(device, shader);
                 if (instanceTable) {
-                    pass.setBindGroup(shader.meta.entityGroupIndex ?? 2, instanceTable.native, [0]);
+                    pass.setBindGroup(shader.meta.instanceGroupIndex ?? 2, instanceTable.native, [0]);
                 }
             }
         }
@@ -595,8 +595,8 @@ export class MeshRendererWGPU {
     }
 
     private _getInstanceBindTable(device: GPUDevice, shader: ShaderWGPU): BindTable | null {
-        const entityGroupIdx = shader.meta.entityGroupIndex ?? 2;
-        const layout = shader.bindGroupLayouts[entityGroupIdx];
+        const instanceGroupIdx = shader.meta.instanceGroupIndex ?? shader.meta.entityGroupIndex ?? 2;
+        const layout = shader.bindGroupLayouts[instanceGroupIdx];
         if (!layout || !this._instanceBuffer) return null;
 
         const entries: BindingEntry[] = [
@@ -750,26 +750,26 @@ export class MeshRendererWGPU {
         let bindingIndex = 0;
 
         // Model & Normal matrices (128 bytes total: 2 x 64 bytes)
-        const entityBytes = 128;
-        const entityBuf = this.uniformPool.acquire(device, entityBytes);
-        const entityData = new Float32Array(32);
+        const transformBytes = 128;
+        const transformBuf = this.uniformPool.acquire(device, transformBytes);
+        const transformData = new Float32Array(32);
 
         if (worldMatrix) {
-            entityData.set(worldMatrix as ArrayLike<number>, 0);
+            transformData.set(worldMatrix as ArrayLike<number>, 0);
             if (normalMatrixOverride) {
-                entityData.set(normalMatrixOverride as ArrayLike<number>, 16);
+                transformData.set(normalMatrixOverride as ArrayLike<number>, 16);
             } else {
-                entityData.set(worldMatrix as ArrayLike<number>, 16);
+                transformData.set(worldMatrix as ArrayLike<number>, 16);
             }
         } else {
-            entityData.set(IDENTITY_MAT4, 0);
-            entityData.set(IDENTITY_MAT4, 16);
+            transformData.set(IDENTITY_MAT4, 0);
+            transformData.set(IDENTITY_MAT4, 16);
         }
-        entityBuf.write(device, entityData);
+        transformBuf.write(device, transformData);
 
         entries.push({
             binding: bindingIndex++,
-            resource: { buffer: entityBuf.native, offset: 0, size: entityBytes },
+            resource: { buffer: transformBuf.native, offset: 0, size: transformBytes },
         });
 
         // Camera Uniforms (208 bytes)
