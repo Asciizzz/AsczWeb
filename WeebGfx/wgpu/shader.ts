@@ -24,7 +24,7 @@ export interface ShaderGroupMetaWGPU {
 }
 
 /**
- * WebGPU implementation of ShaderGPU utilizing RasterPipeline from @asciiz/atoolkit/awgpu.
+ * WebGPU implementation of ShaderGPU wrapping RasterPipeline and bind layouts.
  */
 export class ShaderWGPU extends ShaderGPU {
     pipeline: RasterPipeline;

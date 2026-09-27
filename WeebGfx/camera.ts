@@ -3,8 +3,7 @@ import { Mat4, Vec3 } from "@asciiz/atoolkit/alm";
 export type CameraProjectionMode = "perspective" | "orthographic";
 
 /**
- * Camera structure encapsulating view, projection, and zero-allocation uniform packing.
- * High-performance: maintains preallocated matrices and packed uniform buffers.
+ * Computes view and projection matrices and packs them into a continuous uniform buffer.
  */
 export class Camera {
     readonly viewMatrix = Mat4.create();
@@ -141,7 +140,7 @@ export class Camera {
     private _updateViewProj(): void {
         this.projMatrix.mul(this.viewMatrix, this.viewProjMatrix);
 
-        // Pack into continuous uniform buffer (zero heap allocation)
+        // Pack into preallocated uniform buffer
         this.uniformData.set(this.viewMatrix, 0);
         this.uniformData.set(this.projMatrix, 16);
         this.uniformData.set(this.viewProjMatrix, 32);

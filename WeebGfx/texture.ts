@@ -1,5 +1,5 @@
 /**
- * Pure CPU texture resource holding raw pixel data and dimensions.
+ * CPU texture resource holding pixel data and dimensions.
  */
 export class TextureCPU {
     width: number;
@@ -21,8 +21,7 @@ export class TextureCPU {
 }
 
 /**
- * Base inheritable GPU texture resource representing shader data in general.
- * Decoupled from any specific graphics API. Subclasses implement hardware bindings.
+ * Hardware-agnostic base texture resource defining dimensions and format.
  */
 export class TextureGPU {
     width: number;

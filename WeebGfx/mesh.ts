@@ -1,8 +1,7 @@
 import type { VertexLayout, Submesh } from "./types.js";
 
 /**
- * Pure CPU geometry resource holding raw binary data and vertex layout.
- * Enforces zero encapsulation: attributes are directly accessible.
+ * CPU geometry resource holding binary vertex data, index arrays, and vertex layouts.
  */
 export class MeshCPU {
     layout: VertexLayout;
@@ -27,8 +26,7 @@ export class MeshCPU {
 }
 
 /**
- * Base inheritable GPU geometry resource.
- * Decoupled from any specific graphics API. Subclasses hold native GPU buffers.
+ * Hardware-agnostic GPU geometry base class holding CPU mesh references and submesh descriptors.
  */
 export class MeshGPU {
     cpu: MeshCPU;

@@ -1,8 +1,7 @@
 import type { ShaderParams } from "./types.js";
 
 /**
- * Base inheritable GPU shader pipeline resource.
- * Decoupled from any specific graphics API.
+ * Hardware-agnostic base shader pipeline holding default material parameters and optional source code.
  */
 export class ShaderGPU {
     defaultParams: ShaderParams;

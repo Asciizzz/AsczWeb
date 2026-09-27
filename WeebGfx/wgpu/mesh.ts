@@ -2,7 +2,7 @@ import { Buffer } from "@asciiz/atoolkit/awgpu";
 import { MeshGPU, type MeshCPU } from "../mesh.js";
 
 /**
- * WebGPU implementation of MeshGPU utilizing modern Buffer from @asciiz/atoolkit/awgpu.
+ * WebGPU implementation of MeshGPU storing GPU vertex and index buffers.
  */
 export class MeshWGPU extends MeshGPU {
     vertexBuffer: Buffer;
@@ -22,21 +22,21 @@ export class MeshWGPU extends MeshGPU {
     }
 
     /**
-     * Returns the underlying native GPUBuffer for the vertex buffer.
+     * Returns underlying native GPUBuffer for vertex buffer.
      */
     get nativeVertexBuffer(): GPUBuffer {
         return this.vertexBuffer.native;
     }
 
     /**
-     * Returns the underlying native GPUBuffer for the index buffer if present.
+     * Returns underlying native GPUBuffer for index buffer if present.
      */
     get nativeIndexBuffer(): GPUBuffer | undefined {
         return this.indexBuffer?.native;
     }
 
     /**
-     * Promotes a MeshCPU into a MeshWGPU on the provided GPUDevice.
+     * Allocates GPU vertex and index buffers from MeshCPU on GPUDevice.
      */
     static create(device: GPUDevice, cpu: MeshCPU): MeshWGPU {
         const vertexBuffer = Buffer.createVertex(device, cpu.vertexBytes, "MeshWGPU_VertexBuffer");

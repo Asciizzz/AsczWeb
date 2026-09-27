@@ -16,7 +16,7 @@ import { ShaderWGPU } from "./shader.js";
 import { TextureWGPU } from "./texture.js";
 
 /**
- * Execution target containing the external render pass and camera.
+ * Execution target containing render pass and camera.
  */
 export interface RenderTarget {
     pass: GPURenderPassEncoder;
@@ -25,14 +25,14 @@ export interface RenderTarget {
 }
 
 /**
- * Unified render options combining render target and iterable Actors.
+ * Render options combining render target and iterable Actors.
  */
 export interface RenderOptions extends RenderTarget {
     actors?: Iterable<Actor>;
 }
 
 /**
- * Options for directly drawing a single mesh with a shader (zero Actor required).
+ * Options for drawing a single mesh directly with a specified shader.
  */
 export interface DrawMeshOptions extends RenderTarget {
     mesh: MeshWGPU;
@@ -65,14 +65,11 @@ const IDENTITY_MAT4 = new Float32Array([
 ]);
 
 /**
- * WebGPU hardware mesh drawing operator powered by @asciiz/atoolkit/awgpu.
- * Does NOT own the GPU backend, canvas context, or render pass lifecycle.
- * Operates purely as a submesh drawing operator inside a caller-orchestrated render pass.
- *
- * Implements a frequency-slotted WebGPU binding model:
- *   Slot 0 (PerFrame): Camera uniforms (bound once per pass/camera, supports per-Actor camera override)
- *   Slot 1 (PerBatch): Material parameters, textures, samplers (cached via BindTableCache)
- *   Slot 2 (PerInstance): Dynamic transforms with 256-byte aligned dynamic offsets
+ * Submesh draw dispatcher operating within caller-provided render passes.
+ * Uses a three-frequency WebGPU bind group layout:
+ * - Slot 0 (PerFrame): Camera projection uniforms.
+ * - Slot 1 (PerBatch): Material parameters, textures, and samplers.
+ * - Slot 2 (PerInstance): Dynamic transform uniforms with 256-byte offsets.
  */
 export class MeshRendererWGPU {
     device?: GPUDevice;
@@ -119,21 +116,21 @@ export class MeshRendererWGPU {
     }
 
     /**
-     * Resets internal uniform buffer pool allocations and staging offsets at the beginning of a frame.
+     * Resets uniform buffer pool allocations at start of frame.
      */
     reset(): void {
         this.uniformPool.reset();
     }
 
     /**
-     * Draws a single Actor inside the specified render pass.
+     * Draws single Actor inside render pass.
      */
     draw(target: RenderTarget, actor: Actor): void {
         this.render(target, [actor]);
     }
 
     /**
-     * Executes render pass across an iterable of Actor instances using an external render pass and Camera.
+     * Executes draw calls across iterable of Actors inside render pass.
      */
     render(
         targetOrOptions: RenderOptions | RenderTarget,
@@ -148,17 +145,17 @@ export class MeshRendererWGPU {
 
         if (!pass) {
             throw new Error(
-                "[MeshRendererWGPU] Render pass was not provided! Pass a valid GPURenderPassEncoder in options: { pass, ... }."
+                "[MeshRendererWGPU] Render pass was not provided. Pass valid GPURenderPassEncoder in options: { pass, ... }."
             );
         }
         if (!defaultCamera) {
             throw new Error(
-                "[MeshRendererWGPU] Camera was not provided! Pass a valid Camera instance in options: { camera, ... }."
+                "[MeshRendererWGPU] Camera was not provided. Pass valid Camera instance in options: { camera, ... }."
             );
         }
         if (!device) {
             throw new Error(
-                "[MeshRendererWGPU] GPUDevice was not provided! Pass device to new RendererWGPU(device) or in render options: { device, ... }."
+                "[MeshRendererWGPU] GPUDevice was not provided. Pass device to new RendererWGPU(device) or in render options: { device, ... }."
             );
         }
 
@@ -205,10 +202,10 @@ export class MeshRendererWGPU {
             }
         }
 
-        // Upload transforms in one single batch
+        // Upload transforms in one batch
         this._transformBuffer.write(device, this._transformStaging.subarray(0, requiredFloats), 0);
 
-        // 2. Render loop with state filtering & per-Actor camera override
+        // 2. Render loop with state filtering and per-Actor camera override
         let lastBoundPipeline: GPURenderPipeline | undefined;
         let lastBoundMesh: MeshWGPU | undefined;
         let lastBoundMaterial: BindTable | undefined;
@@ -253,11 +250,11 @@ export class MeshRendererWGPU {
                     lastBoundPipeline = shader.pipeline.native;
                 }
 
-                // Check layout architecture: 3-group (modern) vs legacy 2-group
+                // Check layout architecture: 3-group vs combined 2-group
                 const isLegacyLayout = shader.meta.entityGroupIndex === shader.meta.cameraGroupIndex;
 
                 if (isLegacyLayout) {
-                    // Legacy Group 0: Combined Entity + Camera
+                    // Combined Group 0: Entity and Camera
                     const legacyGroup0 = this._createLegacyGroup0(
                         device,
                         shader,
@@ -267,7 +264,7 @@ export class MeshRendererWGPU {
                     );
                     if (legacyGroup0) pass.setBindGroup(0, legacyGroup0);
                 } else {
-                    // Modern Slot 0: Camera (PerFrame)
+                    // Slot 0: Camera (PerFrame)
                     if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
                         const cameraTable = this._getCameraBindTable(device, shader);
                         if (cameraTable && lastBoundCameraTable !== cameraTable) {
@@ -276,7 +273,7 @@ export class MeshRendererWGPU {
                         }
                     }
 
-                    // Modern Slot 2: Entity Transform (PerInstance dynamic offset)
+                    // Slot 2: Entity Transform (PerInstance dynamic offset)
                     if (shader.meta.hasEntityTransform && shader.bindGroupLayouts.length > 2) {
                         const entityTable = this._getEntityBindTable(device, shader);
                         if (entityTable) {
@@ -336,7 +333,7 @@ export class MeshRendererWGPU {
     }
 
     /**
-     * Draws a single mesh with a shader directly (zero Actor required).
+     * Draws single mesh with shader inside render pass.
      */
     drawMesh(options: DrawMeshOptions): void {
         const pass = options.pass;
@@ -345,11 +342,11 @@ export class MeshRendererWGPU {
         const mesh = options.mesh;
         const shader = options.shader;
 
-        if (!pass) throw new Error("[MeshRendererWGPU.drawMesh] Render pass was not provided!");
-        if (!camera) throw new Error("[MeshRendererWGPU.drawMesh] Camera was not provided!");
-        if (!device) throw new Error("[MeshRendererWGPU.drawMesh] GPUDevice was not provided!");
-        if (!mesh) throw new Error("[MeshRendererWGPU.drawMesh] Mesh was not provided!");
-        if (!shader) throw new Error("[MeshRendererWGPU.drawMesh] Shader was not provided!");
+        if (!pass) throw new Error("[MeshRendererWGPU.drawMesh] Render pass was not provided.");
+        if (!camera) throw new Error("[MeshRendererWGPU.drawMesh] Camera was not provided.");
+        if (!device) throw new Error("[MeshRendererWGPU.drawMesh] GPUDevice was not provided.");
+        if (!mesh) throw new Error("[MeshRendererWGPU.drawMesh] Mesh was not provided.");
+        if (!shader) throw new Error("[MeshRendererWGPU.drawMesh] Shader was not provided.");
 
         // Bind vertex and index buffers
         pass.setVertexBuffer(0, mesh.vertexBuffer.native);
@@ -590,7 +587,7 @@ export class MeshRendererWGPU {
     }
 
     /**
-     * Fallback creation for legacy 2-group shaders combining Entity and Camera into Group 0.
+     * Fallback creation for combined 2-group shaders binding transform and camera in Group 0.
      */
     private _createLegacyGroup0(
         device: GPUDevice,
@@ -638,7 +635,7 @@ export class MeshRendererWGPU {
         });
 
         return device.createBindGroup({
-            label: "WeebGfx_Legacy_Group0",
+            label: "WeebGfx_Combined_Group0",
             layout,
             entries,
         });

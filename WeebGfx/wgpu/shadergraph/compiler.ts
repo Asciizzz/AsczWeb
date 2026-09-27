@@ -60,12 +60,11 @@ export interface ShaderSourceWGPU {
 }
 
 /**
- * WebGPU-specific unified shader graph compiler.
- * Directly compiles a vertex-fragment graph into WGSL and instantiates modern RasterPipeline.
- * Uses a frequency-slotted 3-tier binding model:
- *   Group 0: Frame / Camera uniforms (SlotFrequency.PerFrame)
- *   Group 1: Material parameters & textures (SlotFrequency.PerBatch)
- *   Group 2: Entity dynamic transforms (SlotFrequency.PerInstance)
+ * Compiles a vertex-fragment node graph into WGSL source and initializes RasterPipeline.
+ * Uses a three-frequency binding layout:
+ * - Group 0: Frame and camera uniforms (PerFrame).
+ * - Group 1: Material parameters and textures (PerBatch).
+ * - Group 2: Entity dynamic transforms (PerInstance).
  */
 export class ShaderGraphWGPU {
     nodes: Map<string, Node> = new Map();

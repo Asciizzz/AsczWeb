@@ -17,10 +17,10 @@ export interface ActorOptions {
     /** Target GPU mesh */
     mesh: MeshGPU;
 
-    /** Single shader for all submeshes or an array per submesh */
+    /** Single shader for all submeshes or array per submesh */
     shaders?: ShaderGPU | (ShaderGPU | null)[];
 
-    /** Material parameters per submesh or single uniform bag */
+    /** Material parameters per submesh or single uniform collection */
     params?: ShaderParams | ShaderParams[];
 
     /** 4x4 World matrix */
@@ -29,7 +29,7 @@ export interface ActorOptions {
     /** Optional 4x4 normal matrix */
     normalMatrix?: Float32Array | ArrayLike<number>;
 
-    /** Optional camera override. If omitted, inherits the pass camera. */
+    /** Optional camera override */
     camera?: Camera;
 
     /** Optional skeletal skinning joint matrices */
@@ -41,7 +41,7 @@ export interface ActorOptions {
     /** Optional continuous Float32Array of 4x4 instance matrices for GPU instancing */
     instances?: Float32Array;
 
-    /** Number of instances to draw (defaults to 1, or instances.length / 16) */
+    /** Number of instances to draw */
     instanceCount?: number;
 }
 
@@ -53,9 +53,7 @@ const IDENTITY_MAT4 = new Float32Array([
 ]);
 
 /**
- * Atomic draw item in WeebGfx.
- * Directly holds all hardware drawing assets: mesh, shader(s), material parameters,
- * transform, optional camera override, skeleton skinning, and GPU instancing.
+ * Draw item holding mesh, shaders, material parameters, transform, camera override, and skinning data.
  */
 export class Actor {
     mesh: MeshGPU;
@@ -150,7 +148,7 @@ export class Actor {
     }
 
     /**
-     * Updates world matrix and optional normal matrix.
+     * Sets world matrix and optional normal matrix.
      */
     setTransform(
         world: Float32Array | ArrayLike<number>,
@@ -180,7 +178,7 @@ export class Actor {
     }
 
     /**
-     * Sets or replaces shader for a specific submesh index (defaults to index 0).
+     * Sets shader for specified submesh index.
      */
     setShader(shader: ShaderGPU | null, submeshIndex = 0): this {
         this.shaders[submeshIndex] = shader;
@@ -188,7 +186,7 @@ export class Actor {
     }
 
     /**
-     * Sets or replaces material parameter bag for a specific submesh index (defaults to index 0).
+     * Sets material parameters for specified submesh index.
      */
     setParams(params: ShaderParams, submeshIndex = 0): this {
         this.params[submeshIndex] = params;
@@ -196,8 +194,7 @@ export class Actor {
     }
 
     /**
-     * Sets or clears an Actor-specific camera override.
-     * When set, the renderer switches Slot 0 to this camera for this Actor's draw call.
+     * Sets camera override.
      */
     setCamera(camera?: Camera): this {
         this.camera = camera;
@@ -220,7 +217,7 @@ export class Actor {
     }
 
     /**
-     * Configures GPU instancing with a continuous Float32Array of 4x4 instance matrices.
+     * Sets instance matrices for instanced draws.
      */
     setInstances(instances: Float32Array, count?: number): this {
         this.instances = instances;

@@ -2,15 +2,14 @@ import { Texture, Sampler } from "@asciiz/atoolkit/awgpu";
 import { TextureGPU, type TextureCPU } from "../texture.js";
 
 /**
- * WebGPU implementation of TextureGPU holding native GPUTexture, GPUTextureView, and GPUSampler,
- * with first-class integration with @asciiz/atoolkit/awgpu Texture and Sampler handles.
+ * WebGPU implementation of TextureGPU holding GPUTexture, GPUTextureView, and GPUSampler handles.
  */
 export class TextureWGPU extends TextureGPU {
     texture: GPUTexture;
     view: GPUTextureView;
     sampler: GPUSampler;
 
-    // Awgpu managed wrappers for Level 3 binding tables and pass graphs
+    // Awgpu handles for binding table cache
     awgpuTexture: Texture;
     awgpuSampler: Sampler;
 
@@ -73,7 +72,7 @@ export class TextureWGPU extends TextureGPU {
     }
 
     /**
-     * Wraps an externally created GPUTexture (such as an RTT render target).
+     * Wraps an externally created GPUTexture.
      */
     static fromGPU(
         device: GPUDevice,
@@ -97,7 +96,7 @@ export class TextureWGPU extends TextureGPU {
     }
 
     /**
-     * Creates an offscreen Render Target Texture (RTT) for multipass or procedural rendering.
+     * Creates an offscreen render target texture.
      */
     static createRenderTarget(
         device: GPUDevice,
