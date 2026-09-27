@@ -13,3 +13,7 @@ archive/
 .agents/
 AIsigns.md
 tests/
+
+# Plans and design drafts
+plan.md
+*plan.md
