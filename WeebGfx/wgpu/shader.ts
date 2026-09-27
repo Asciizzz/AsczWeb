@@ -54,7 +54,7 @@ export class ShaderWGPU extends ShaderGPU {
         this.meta = {
             hasCamera: meta?.hasCamera ?? (wgslCode.includes("u_camera") || wgslCode.includes("CameraUniforms")),
             hasMaterial: meta?.hasMaterial ?? (wgslCode.includes("u_material") || (paramBindings && (paramBindings.hasMaterialUniform || paramBindings.textures.length > 0 || paramBindings.samplers.length > 0)) || false),
-            hasEntityTransform: meta?.hasEntityTransform ?? (wgslCode.includes("u_entity") || wgslCode.includes("EntityUniforms")),
+            hasEntityTransform: meta?.hasEntityTransform ?? (wgslCode.includes("u_instances") || wgslCode.includes("InstanceData") || wgslCode.includes("u_entity") || wgslCode.includes("EntityUniforms")),
             hasSkin: meta?.hasSkin ?? (wgslCode.includes("u_skin") || wgslCode.includes("SkinUniforms")),
             cameraGroupIndex: meta?.cameraGroupIndex ?? 0,
             materialGroupIndex: meta?.materialGroupIndex ?? 1,

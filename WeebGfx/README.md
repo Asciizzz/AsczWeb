@@ -16,29 +16,38 @@ WeebGfx provides two operational layers:
 
 ### Actor
 
-`Actor` is the atomic draw item in WeebGfx. It holds hardware resources, transformation matrices, optional camera overrides, and skinning data.
+`Actor` is the atomic draw item in WeebGfx. It holds hardware resources, unified instance transforms, optional camera overrides, and skeletal skinning data. Instancing is the default state: a single entity is treated as 1 instance.
 
 ```typescript
 import { Actor } from "@asciiz/weebgfx";
 
+// Single object (1 instance):
 const actor = new Actor({
     mesh: meshWgpu,
     shaders: shaderWgpu,
     transform: worldMatrix,
     camera: customCamera,
-    instances: instanceMatrices,
+});
+
+// Multi-instance batch (N instances):
+const batchActor = new Actor({
+    mesh: meshWgpu,
+    shaders: shaderWgpu,
+    instances: flatMatricesFloat32Array,
+    instanceCount: 100,
 });
 ```
 
 - `mesh`: GPU mesh instance providing vertex and optional index buffers.
 - `shaders`: Single shader applied across all submeshes, or array mapping to specific submesh indices.
 - `params`: Material parameter collections (floats, vectors, textures, samplers).
-- `transform`: 16-element Float32Array world transformation matrix.
-- `normalMatrix`: Optional 16-element Float32Array normal transformation matrix.
+- `instances`: Unified `InstanceData` containing `matrices` (`Float32Array`), optional `normalMatrices`, and active `count`.
+- `transform`: Getter/setter for the world transformation matrix of instance 0.
+- `normalMatrix`: Getter/setter for the normal transformation matrix of instance 0.
+- `instanceCount`: Number of instances to dispatch. Defaults to 1 for single objects.
 - `camera`: Optional `Camera` override. When set, renderer switches camera uniforms for this actor's draw call.
 - `skin`: Optional skeletal joint matrices (`Float32Array`) and joint count.
-- `instances`: Optional continuous `Float32Array` of 4x4 instance matrices for GPU instancing.
-- `instanceCount`: Number of instances to dispatch.
+- **Instanced Skinning Rule**: When an actor specifies both multiple instances and skinning data, all instances share the identical skeletal pose in synchronized space.
 
 ### Camera
 
@@ -90,29 +99,37 @@ const gpuMesh = MeshWGPU.create(device, cpuMesh);
 
 ## WebGPU Renderer
 
-`MeshRendererWGPU` executes draw calls inside a caller-provided render pass.
+`MeshRendererWGPU` executes draw calls inside a caller-provided render pass. It supports both immediate execution and deferred submission with state sorting.
 
 ### Frequency-Slotted Binding Model
 
-Pipelines adhere to a three-frequency WebGPU bind group layout:
+Pipelines adhere to a four-frequency WebGPU bind group layout:
 - **Group 0 (PerFrame)**: Camera projection and view uniforms. Bound once per frame or when an actor overrides the camera.
 - **Group 1 (PerBatch)**: Material uniforms, textures, and samplers. Cached through internal `BindTableCache`.
-- **Group 2 (PerInstance)**: Dynamic transform uniforms with 256-byte dynamic offsets.
+- **Group 2 (PerInstance)**: Read-only storage buffer of instance transforms indexed via `@builtin(instance_index)` with 256-byte dynamic offsets.
+- **Group 3 (PerInstance)**: Skeletal joint uniform buffer array (`array<mat4x4<f32>, 64>`).
 
-### Drawing Actors
+### Deferred Rendering and Drawing
 
 ```typescript
 import { MeshRendererWGPU } from "@asciiz/weebgfx";
 
 const renderer = new MeshRendererWGPU(device);
 
-// Single actor draw:
+// Mode 1: Deferred submission (recommended for state sorting)
+renderer.submit(actorA);
+renderer.submit(actorB);
+renderer.flush({ pass, camera });
+
+// Mode 2: Immediate direct execution
 renderer.draw({ pass, camera }, actor);
 
-// Batch render:
+// Mode 3: Direct batch execution
 renderer.render({ pass, camera }, [actor1, actor2, actor3]);
 ```
 
+- `submit(actor)`: Queues actor into internal draw list without immediate GPU dispatch.
+- `flush(target)`: Sorts queued draws by camera, pipeline, and mesh to minimize GPU state transitions, executes draw commands, and resets queue.
 - `target.pass`: Active `GPURenderPassEncoder`.
 - `target.camera`: Default camera used for draw calls unless overridden by `actor.camera`.
 - `target.device`: Optional `GPUDevice` if not provided during renderer construction.
@@ -168,6 +185,8 @@ const shader = graph.compile(device, {
 });
 ```
 
+- `EntityTransformNode`: Automatically handles world matrix multiplication. Shaders compile identically for 1 instance or 10,000 instances via `@builtin(instance_index)`.
+- `SkinTransformNode`: Deforms local vertex positions and normals according to weighted joint indices against the Group 3 joint array.
 - `chainVertexInputs()`: Links sequential vertex inputs into a unified `VertexLayout` descriptor.
 - `compile()`: Topologically sorts graph nodes, analyzes cross-stage data routing (auto-varyings), extracts uniform parameter bindings, compiles WGSL source, and allocates the underlying `RasterPipeline`.
 
@@ -202,12 +221,13 @@ const actor = new Actor({
     transform: worldMatrix,
 });
 
-// 4. Render frame
+// 4. Render frame with deferred submission
 function frame() {
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass(renderPassDesc);
 
-    renderer.draw({ pass, camera }, actor);
+    renderer.submit(actor);
+    renderer.flush({ pass, camera });
 
     pass.end();
     device.queue.submit([encoder.finish()]);

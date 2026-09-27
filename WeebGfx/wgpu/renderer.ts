@@ -57,6 +57,11 @@ const BUFFER_USAGE_UNIFORM_COPY_DST =
         ? GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         : 0x0040 | 0x0008; // 72
 
+const BUFFER_USAGE_STORAGE_COPY_DST =
+    typeof GPUBufferUsage !== "undefined"
+        ? GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        : 0x0080 | 0x0008; // 136
+
 const IDENTITY_MAT4 = new Float32Array([
     1, 0, 0, 0,
     0, 1, 0, 0,
@@ -64,12 +69,25 @@ const IDENTITY_MAT4 = new Float32Array([
     0, 0, 0, 1,
 ]);
 
+let _nextStateId = 1;
+const _stateIdMap = new WeakMap<object, number>();
+function getStateId(obj: object | null | undefined): number {
+    if (!obj) return 0;
+    let id = _stateIdMap.get(obj);
+    if (id === undefined) {
+        id = _nextStateId++;
+        _stateIdMap.set(obj, id);
+    }
+    return id;
+}
+
 /**
  * Submesh draw dispatcher operating within caller-provided render passes.
- * Uses a three-frequency WebGPU bind group layout:
+ * Uses a four-frequency WebGPU bind group layout:
  * - Slot 0 (PerFrame): Camera projection uniforms.
  * - Slot 1 (PerBatch): Material parameters, textures, and samplers.
- * - Slot 2 (PerInstance): Dynamic transform uniforms with 256-byte offsets.
+ * - Slot 2 (PerInstance): Storage buffer instances with 256-byte dynamic offsets.
+ * - Slot 3 (PerInstance): Skeletal joint uniform array.
  */
 export class MeshRendererWGPU {
     device?: GPUDevice;
@@ -81,9 +99,12 @@ export class MeshRendererWGPU {
     private _lastCameraData = new Float32Array(52);
     private _cameraInitialized = false;
 
-    // Dynamic transform uniform buffer & CPU staging array (aligned to 256 bytes = 64 floats per instance)
-    private _transformBuffer?: Buffer;
-    private _transformStaging = new Float32Array(1024 * 64);
+    // Instance transform storage buffer & CPU staging array
+    private _instanceBuffer?: Buffer;
+    private _instanceStaging = new Float32Array(1024 * 64);
+
+    // Deferred submission queue
+    private _queue: Actor[] = [];
 
     // Fallback assets
     private _fallbackTexture?: TextureWGPU;
@@ -123,6 +144,41 @@ export class MeshRendererWGPU {
     }
 
     /**
+     * Submits single Actor to draw queue for deferred rendering.
+     */
+    submit(actor: Actor): this {
+        this._queue.push(actor);
+        return this;
+    }
+
+    /**
+     * Submits multiple Actors to draw queue for deferred rendering.
+     */
+    submitBatch(actors: Iterable<Actor>): this {
+        for (const actor of actors) {
+            this._queue.push(actor);
+        }
+        return this;
+    }
+
+    /**
+     * Clears pending Actor submission queue.
+     */
+    clearQueue(): void {
+        this._queue.length = 0;
+    }
+
+    /**
+     * Executes draw calls for all submitted Actors in queue, then clears queue.
+     */
+    flush(target: RenderTarget): void {
+        if (this._queue.length > 0) {
+            this.render(target, this._queue);
+            this.clearQueue();
+        }
+    }
+
+    /**
      * Draws single Actor inside render pass.
      */
     draw(target: RenderTarget, actor: Actor): void {
@@ -131,6 +187,7 @@ export class MeshRendererWGPU {
 
     /**
      * Executes draw calls across iterable of Actors inside render pass.
+     * Groups draws by camera, shader pipeline, and mesh to minimize GPU state switches.
      */
     render(
         targetOrOptions: RenderOptions | RenderTarget,
@@ -159,7 +216,7 @@ export class MeshRendererWGPU {
             );
         }
 
-        const actors = actorsArg ?? options.actors;
+        const actors = actorsArg ?? options.actors ?? this._queue;
         if (!actors) return;
 
         // 1. Collect active actors and filter valid hardware meshes
@@ -176,36 +233,80 @@ export class MeshRendererWGPU {
 
         if (count === 0) return;
 
-        // Ensure transform staging and GPU buffer capacity (256 bytes = 64 floats per instance)
-        const requiredFloats = count * 64;
-        if (this._transformStaging.length < requiredFloats) {
-            this._transformStaging = new Float32Array(Math.max(requiredFloats, this._transformStaging.length * 2));
+        // 2. State sorting to minimize camera, pipeline, and mesh switches
+        activeActors.sort((a, b) => {
+            const camA = getStateId(a.camera);
+            const camB = getStateId(b.camera);
+            if (camA !== camB) return camA - camB;
+
+            const sA = a.shaders[0];
+            const sB = b.shaders[0];
+            const pipeA = getStateId(sA instanceof ShaderWGPU ? sA.pipeline.native : sA);
+            const pipeB = getStateId(sB instanceof ShaderWGPU ? sB.pipeline.native : sB);
+            if (pipeA !== pipeB) return pipeA - pipeB;
+
+            const meshA = getStateId(a.mesh);
+            const meshB = getStateId(b.mesh);
+            return meshA - meshB;
+        });
+
+        // 3. Compute 256-byte aligned dynamic offsets for each actor
+        const actorOffsets = new Uint32Array(count);
+        let totalBytes = 0;
+        for (let i = 0; i < count; i++) {
+            actorOffsets[i] = totalBytes;
+            const instCount = Math.max(1, activeActors[i].instances.count);
+            const bytesNeeded = instCount * 128; // 32 floats = 128 bytes per instance
+            totalBytes += Math.ceil(bytesNeeded / 256) * 256;
         }
 
-        const requiredBytes = count * 256;
-        if (!this._transformBuffer || this._transformBuffer.size < requiredBytes) {
-            this._transformBuffer?.destroy();
-            const allocSize = Math.max(requiredBytes, 65536);
-            this._transformBuffer = Buffer.createUniform(device, allocSize, "MeshRenderer_TransformBuffer");
+        const totalFloats = totalBytes / 4;
+        if (this._instanceStaging.length < totalFloats) {
+            this._instanceStaging = new Float32Array(Math.max(totalFloats, this._instanceStaging.length * 2));
         }
 
-        // Write model and normal matrices into staging array
+        if (!this._instanceBuffer || this._instanceBuffer.size < totalBytes) {
+            this._instanceBuffer?.destroy();
+            const allocSize = Math.max(totalBytes, 65536);
+            this._instanceBuffer = Buffer.create(device, {
+                size: allocSize,
+                usage: BUFFER_USAGE_STORAGE_COPY_DST,
+                label: "MeshRenderer_InstanceStorageBuffer",
+            });
+        }
+
+        // 4. Pack instance matrices into CPU staging buffer
         for (let i = 0; i < count; i++) {
             const actor = activeActors[i];
-            const floatOffset = i * 64;
+            const instCount = Math.max(1, actor.instances.count);
+            const baseFloatOffset = actorOffsets[i] / 4;
+            const matrices = actor.instances.matrices;
+            const normalMatrices = actor.instances.normalMatrices;
 
-            this._transformStaging.set(actor.transform, floatOffset);
-            if (actor.normalMatrix) {
-                this._transformStaging.set(actor.normalMatrix, floatOffset + 16);
-            } else {
-                this._transformStaging.set(actor.transform, floatOffset + 16);
+            for (let inst = 0; inst < instCount; inst++) {
+                const srcMatOffset = inst * 16;
+                const dstOffset = baseFloatOffset + inst * 32;
+
+                if (srcMatOffset + 16 <= matrices.length) {
+                    this._instanceStaging.set(matrices.subarray(srcMatOffset, srcMatOffset + 16), dstOffset);
+                } else {
+                    this._instanceStaging.set(IDENTITY_MAT4, dstOffset);
+                }
+
+                if (normalMatrices && srcMatOffset + 16 <= normalMatrices.length) {
+                    this._instanceStaging.set(normalMatrices.subarray(srcMatOffset, srcMatOffset + 16), dstOffset + 16);
+                } else if (srcMatOffset + 16 <= matrices.length) {
+                    this._instanceStaging.set(matrices.subarray(srcMatOffset, srcMatOffset + 16), dstOffset + 16);
+                } else {
+                    this._instanceStaging.set(IDENTITY_MAT4, dstOffset + 16);
+                }
             }
         }
 
-        // Upload transforms in one batch
-        this._transformBuffer.write(device, this._transformStaging.subarray(0, requiredFloats), 0);
+        // Upload packed instances in single transfer
+        this._instanceBuffer.write(device, this._instanceStaging.subarray(0, totalFloats), 0);
 
-        // 2. Render loop with state filtering and per-Actor camera override
+        // 5. Render loop with state filtering and per-Actor camera override
         let lastBoundPipeline: GPURenderPipeline | undefined;
         let lastBoundMesh: MeshWGPU | undefined;
         let lastBoundMaterial: BindTable | undefined;
@@ -216,8 +317,8 @@ export class MeshRendererWGPU {
             const actor = activeActors[i];
             const mesh = actor.mesh as MeshWGPU;
             const submeshes = mesh.submeshes;
-            const dynamicOffset = i * 256;
-            const instanceCount = actor.instanceCount > 0 ? actor.instanceCount : 1;
+            const dynamicOffset = actorOffsets[i];
+            const instanceCount = Math.max(1, actor.instances.count);
             const effectiveCamera = actor.camera ?? defaultCamera;
 
             // Camera update (Slot 0): check if camera changed
@@ -273,13 +374,13 @@ export class MeshRendererWGPU {
                         }
                     }
 
-                    // Slot 2: Entity Transform (PerInstance dynamic offset)
+                    // Slot 2: Instance Transform Storage Buffer (PerInstance dynamic offset)
                     if (shader.meta.hasEntityTransform && shader.bindGroupLayouts.length > 2) {
-                        const entityTable = this._getEntityBindTable(device, shader);
-                        if (entityTable) {
+                        const instanceTable = this._getInstanceBindTable(device, shader);
+                        if (instanceTable) {
                             pass.setBindGroup(
                                 shader.meta.entityGroupIndex ?? 2,
-                                entityTable.native,
+                                instanceTable.native,
                                 [dynamicOffset]
                             );
                         }
@@ -389,22 +490,26 @@ export class MeshRendererWGPU {
                 }
             }
 
-            // Entity Transform (Slot 2)
+            // Instance Transform (Slot 2)
             if (shader.meta.hasEntityTransform && shader.bindGroupLayouts.length > 2) {
-                if (!this._transformBuffer || this._transformBuffer.size < 256) {
-                    this._transformBuffer?.destroy();
-                    this._transformBuffer = Buffer.createUniform(device, 65536, "MeshRenderer_TransformBuffer");
+                if (!this._instanceBuffer || this._instanceBuffer.size < 256) {
+                    this._instanceBuffer?.destroy();
+                    this._instanceBuffer = Buffer.create(device, {
+                        size: 65536,
+                        usage: BUFFER_USAGE_STORAGE_COPY_DST,
+                        label: "MeshRenderer_InstanceStorageBuffer",
+                    });
                 }
 
                 const world = (options.worldMatrix as Float32Array) ?? IDENTITY_MAT4;
                 const normal = (options.normalMatrix as Float32Array) ?? world;
-                this._transformStaging.set(world, 0);
-                this._transformStaging.set(normal, 16);
-                this._transformBuffer.write(device, this._transformStaging.subarray(0, 32), 0);
+                this._instanceStaging.set(world, 0);
+                this._instanceStaging.set(normal, 16);
+                this._instanceBuffer.write(device, this._instanceStaging.subarray(0, 32), 0);
 
-                const entityTable = this._getEntityBindTable(device, shader);
-                if (entityTable) {
-                    pass.setBindGroup(shader.meta.entityGroupIndex ?? 2, entityTable.native, [0]);
+                const instanceTable = this._getInstanceBindTable(device, shader);
+                if (instanceTable) {
+                    pass.setBindGroup(shader.meta.entityGroupIndex ?? 2, instanceTable.native, [0]);
                 }
             }
         }
@@ -489,16 +594,16 @@ export class MeshRendererWGPU {
         });
     }
 
-    private _getEntityBindTable(device: GPUDevice, shader: ShaderWGPU): BindTable | null {
+    private _getInstanceBindTable(device: GPUDevice, shader: ShaderWGPU): BindTable | null {
         const entityGroupIdx = shader.meta.entityGroupIndex ?? 2;
         const layout = shader.bindGroupLayouts[entityGroupIdx];
-        if (!layout || !this._transformBuffer) return null;
+        if (!layout || !this._instanceBuffer) return null;
 
         const entries: BindingEntry[] = [
             {
                 binding: 0,
                 resource: {
-                    buffer: this._transformBuffer.native,
+                    buffer: this._instanceBuffer.native,
                     offset: 0,
                     size: 128,
                 },
@@ -507,7 +612,7 @@ export class MeshRendererWGPU {
 
         return this.bindTableCache.getOrCreate(device, layout, entries, {
             slot: SlotFrequency.PerInstance,
-            label: "EntityTransform_BindTable",
+            label: "InstanceTransform_BindTable",
         });
     }
 
@@ -685,10 +790,11 @@ export class MeshRendererWGPU {
 
     destroy(): void {
         this._cameraBuffer?.destroy();
-        this._transformBuffer?.destroy();
+        this._instanceBuffer?.destroy();
         this._fallbackTexture?.destroy();
         this.uniformPool.destroy();
         this.bindTableCache.clear();
+        this.clearQueue();
     }
 }
 

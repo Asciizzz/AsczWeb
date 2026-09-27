@@ -41,7 +41,7 @@ const RESERVED_WGSL_KEYWORDS = new Set([
     "vec2", "vec3", "vec4", "ptr", "sampler", "texture_2d", "struct", "fn", "var", "let",
     "const", "if", "else", "for", "while", "loop", "break", "continue", "return", "discard",
     "true", "false", "uniform", "storage", "read", "write", "read_write",
-    "in", "out", "u_entity", "u_camera", "u_material",
+    "in", "out", "u_entity", "u_instances", "InstanceData", "u_camera", "u_material",
 ]);
 
 interface VaryingInfo {
@@ -386,13 +386,13 @@ export class ShaderGraphWGPU {
             codeLines.push("");
         }
 
-        // Group 2: Entity Transform Uniforms (SlotFrequency.PerInstance with dynamic offset)
+        // Group 2: Instance Transform Storage Buffer (SlotFrequency.PerInstance)
         if (hasEntityTransform) {
-            codeLines.push("struct EntityUniforms {");
+            codeLines.push("struct InstanceData {");
             codeLines.push("    modelMatrix: mat4x4<f32>,");
             codeLines.push("    normalMatrix: mat4x4<f32>,");
             codeLines.push("};");
-            codeLines.push("@group(2) @binding(0) var<uniform> u_entity: EntityUniforms;");
+            codeLines.push("@group(2) @binding(0) var<storage, read> u_instances: array<InstanceData>;");
             codeLines.push("");
         }
 
@@ -484,20 +484,20 @@ export class ShaderGraphWGPU {
 
         // Emit vs_main
         codeLines.push("@vertex");
-        codeLines.push("fn vs_main(in: VertexInput) -> VertexOutput {");
+        codeLines.push("fn vs_main(in: VertexInput, @builtin(instance_index) instance_idx: u32) -> VertexOutput {");
         codeLines.push("    var out: VertexOutput;");
 
         const vertexNodes = this._getTopologicalStageNodes("vertex", nodeStages);
         for (const node of vertexNodes) {
             if (node instanceof EntityTransformNode) {
                 const inPos = getExpr(node.id, "in_position", "vertex");
-                codeLines.push(`    let ${node.id}_pos = (u_entity.modelMatrix * vec4<f32>(${inPos}, 1.0)).xyz;`);
+                codeLines.push(`    let ${node.id}_pos = (u_instances[instance_idx].modelMatrix * vec4<f32>(${inPos}, 1.0)).xyz;`);
                 const hasNormConn = this.connections.some((c) => c.toNodeId === node.id && c.toSocketId === "in_normal");
                 if (hasNormConn) {
                     const inNorm = getExpr(node.id, "in_normal", "vertex");
-                    codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * vec4<f32>(${inNorm}, 0.0)).xyz;`);
+                    codeLines.push(`    let ${node.id}_norm = (u_instances[instance_idx].normalMatrix * vec4<f32>(${inNorm}, 0.0)).xyz;`);
                 } else {
-                    codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz;`);
+                    codeLines.push(`    let ${node.id}_norm = (u_instances[instance_idx].normalMatrix * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz;`);
                 }
             } else if (node instanceof SkinTransformNode) {
                 const inPos = getExpr(node.id, "in_position", "vertex");
@@ -517,14 +517,14 @@ export class ShaderGraphWGPU {
                 codeLines.push(`        ${inWeights}.y * u_skin.joints[${jy}] +`);
                 codeLines.push(`        ${inWeights}.z * u_skin.joints[${jz}] +`);
                 codeLines.push(`        ${inWeights}.w * u_skin.joints[${jw}];`);
-                codeLines.push(`    let ${node.id}_pos = (u_entity.modelMatrix * (${node.id}_skin_mat * vec4<f32>(${inPos}, 1.0))).xyz;`);
+                codeLines.push(`    let ${node.id}_pos = (u_instances[instance_idx].modelMatrix * (${node.id}_skin_mat * vec4<f32>(${inPos}, 1.0))).xyz;`);
 
                 const hasNormConn = this.connections.some((c) => c.toNodeId === node.id && c.toSocketId === "in_normal");
                 if (hasNormConn) {
                     const inNorm = getExpr(node.id, "in_normal", "vertex");
-                    codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * (${node.id}_skin_mat * vec4<f32>(${inNorm}, 0.0))).xyz;`);
+                    codeLines.push(`    let ${node.id}_norm = (u_instances[instance_idx].normalMatrix * (${node.id}_skin_mat * vec4<f32>(${inNorm}, 0.0))).xyz;`);
                 } else {
-                    codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * (${node.id}_skin_mat * vec4<f32>(0.0, 1.0, 0.0, 0.0))).xyz;`);
+                    codeLines.push(`    let ${node.id}_norm = (u_instances[instance_idx].normalMatrix * (${node.id}_skin_mat * vec4<f32>(0.0, 1.0, 0.0, 0.0))).xyz;`);
                 }
             } else if (node instanceof MultiplyNode) {
                 const a = getExpr(node.id, "a", "vertex");
@@ -739,11 +739,11 @@ export class ShaderGraphWGPU {
         const materialLayout = matBuilder.build(device, "WeebGfx_Group1_MaterialLayout");
         bindLayouts.push(materialLayout);
 
-        // Group 2: Entity Transform Uniforms (SlotFrequency.PerInstance with dynamic offset)
+        // Group 2: Instance Transform Storage Buffer (SlotFrequency.PerInstance with dynamic offset)
         if (meta.hasEntityTransform) {
             const entityLayout = BindLayout.builder()
-                .addUniform(0, STAGE_VERTEX, { hasDynamicOffset: true, minBindingSize: 128 })
-                .build(device, "WeebGfx_Group2_EntityLayout");
+                .addStorage(0, STAGE_VERTEX, { readOnly: true, hasDynamicOffset: true, minBindingSize: 128 })
+                .build(device, "WeebGfx_Group2_InstanceLayout");
             bindLayouts.push(entityLayout);
         }
 

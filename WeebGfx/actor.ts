@@ -13,6 +13,15 @@ export interface MorphData {
     count: number;
 }
 
+export interface InstanceData {
+    /** Contiguous buffer of 4x4 world matrices (16 floats per instance). */
+    matrices: Float32Array;
+    /** Optional contiguous buffer of 4x4 normal matrices (16 floats per instance). */
+    normalMatrices?: Float32Array;
+    /** Number of active instances to render. Defaults to matrices.length / 16. */
+    count: number;
+}
+
 export interface ActorOptions {
     /** Target GPU mesh */
     mesh: MeshGPU;
@@ -23,10 +32,10 @@ export interface ActorOptions {
     /** Material parameters per submesh or single uniform collection */
     params?: ShaderParams | ShaderParams[];
 
-    /** 4x4 World matrix */
+    /** 4x4 World matrix for single instance */
     transform?: Float32Array | ArrayLike<number>;
 
-    /** Optional 4x4 normal matrix */
+    /** Optional 4x4 normal matrix for single instance */
     normalMatrix?: Float32Array | ArrayLike<number>;
 
     /** Optional camera override */
@@ -38,8 +47,8 @@ export interface ActorOptions {
     /** Optional blendshape / morph weights */
     morph?: MorphData;
 
-    /** Optional continuous Float32Array of 4x4 instance matrices for GPU instancing */
-    instances?: Float32Array;
+    /** Instance transforms or contiguous matrix buffer */
+    instances?: InstanceData | Float32Array;
 
     /** Number of instances to draw */
     instanceCount?: number;
@@ -53,19 +62,19 @@ const IDENTITY_MAT4 = new Float32Array([
 ]);
 
 /**
- * Draw item holding mesh, shaders, material parameters, transform, camera override, and skinning data.
+ * Atomic draw item holding mesh, shaders, material parameters, instance transforms,
+ * optional camera override, and skeletal skinning data.
  */
 export class Actor {
     mesh: MeshGPU;
     shaders: (ShaderGPU | null)[];
     params: ShaderParams[];
-    transform: Float32Array;
-    normalMatrix?: Float32Array;
     camera?: Camera;
     skin?: SkinData;
     morph?: MorphData;
-    instances?: Float32Array;
-    instanceCount: number;
+
+    /** Unified instance transform storage. Single entity = 1 instance. */
+    instances: InstanceData;
 
     constructor(
         meshOrOptions: MeshGPU | ActorOptions,
@@ -92,18 +101,46 @@ export class Actor {
                 this.params = [];
             }
 
-            if (opts.transform) {
-                this.transform = opts.transform instanceof Float32Array
+            if (opts.instances) {
+                if (opts.instances instanceof Float32Array) {
+                    const norm = opts.normalMatrix
+                        ? (opts.normalMatrix instanceof Float32Array ? opts.normalMatrix : new Float32Array(opts.normalMatrix))
+                        : undefined;
+                    this.instances = {
+                        matrices: opts.instances,
+                        normalMatrices: norm,
+                        count: opts.instanceCount ?? Math.floor(opts.instances.length / 16),
+                    };
+                    if (opts.transform) {
+                        this.instances.matrices.set(opts.transform, 0);
+                    }
+                } else {
+                    this.instances = {
+                        matrices: opts.instances.matrices,
+                        normalMatrices: opts.instances.normalMatrices,
+                        count: opts.instanceCount ?? opts.instances.count,
+                    };
+                    if (opts.transform) {
+                        this.instances.matrices.set(opts.transform, 0);
+                    }
+                }
+            } else if (opts.transform) {
+                const mat = opts.transform instanceof Float32Array
                     ? opts.transform
                     : new Float32Array(opts.transform);
+                const norm = opts.normalMatrix
+                    ? (opts.normalMatrix instanceof Float32Array ? opts.normalMatrix : new Float32Array(opts.normalMatrix))
+                    : undefined;
+                this.instances = {
+                    matrices: mat,
+                    normalMatrices: norm,
+                    count: opts.instanceCount ?? 1,
+                };
             } else {
-                this.transform = new Float32Array(IDENTITY_MAT4);
-            }
-
-            if (opts.normalMatrix) {
-                this.normalMatrix = opts.normalMatrix instanceof Float32Array
-                    ? opts.normalMatrix
-                    : new Float32Array(opts.normalMatrix);
+                this.instances = {
+                    matrices: new Float32Array(IDENTITY_MAT4),
+                    count: opts.instanceCount ?? 1,
+                };
             }
 
             this.camera = opts.camera;
@@ -120,8 +157,6 @@ export class Actor {
             }
 
             this.morph = opts.morph;
-            this.instances = opts.instances;
-            this.instanceCount = opts.instanceCount ?? (opts.instances ? Math.floor(opts.instances.length / 16) : 1);
         } else {
             this.mesh = meshOrOptions as MeshGPU;
 
@@ -135,44 +170,113 @@ export class Actor {
 
             this.params = [];
 
-            if (transform) {
-                this.transform = transform instanceof Float32Array
-                    ? transform
-                    : new Float32Array(transform);
-            } else {
-                this.transform = new Float32Array(IDENTITY_MAT4);
-            }
+            const mat = transform
+                ? (transform instanceof Float32Array ? transform : new Float32Array(transform))
+                : new Float32Array(IDENTITY_MAT4);
 
-            this.instanceCount = 1;
+            this.instances = {
+                matrices: mat,
+                count: 1,
+            };
         }
     }
 
+    /** World matrix of primary instance (index 0). */
+    get transform(): Float32Array {
+        return this.instances.matrices.subarray(0, 16);
+    }
+
+    set transform(world: Float32Array | ArrayLike<number>) {
+        this.setTransform(world);
+    }
+
+    /** Normal matrix of primary instance (index 0). */
+    get normalMatrix(): Float32Array | undefined {
+        return this.instances.normalMatrices ? this.instances.normalMatrices.subarray(0, 16) : undefined;
+    }
+
+    set normalMatrix(norm: Float32Array | ArrayLike<number> | undefined) {
+        if (!norm) {
+            this.instances.normalMatrices = undefined;
+            return;
+        }
+        if (!this.instances.normalMatrices || this.instances.normalMatrices.length < 16) {
+            this.instances.normalMatrices = new Float32Array(16);
+        }
+        if (norm instanceof Float32Array && norm.length === 16) {
+            this.instances.normalMatrices.set(norm, 0);
+        } else {
+            for (let i = 0; i < 16 && i < norm.length; i++) {
+                this.instances.normalMatrices[i] = norm[i];
+            }
+        }
+    }
+
+    /** Active instance count. */
+    get instanceCount(): number {
+        return this.instances.count;
+    }
+
+    set instanceCount(count: number) {
+        this.instances.count = count;
+    }
+
     /**
-     * Sets world matrix and optional normal matrix.
+     * Sets world matrix and optional normal matrix for a single instance.
+     * Resets active instance count to 1.
      */
     setTransform(
         world: Float32Array | ArrayLike<number>,
         normal?: Float32Array | ArrayLike<number>
     ): this {
-        if (world instanceof Float32Array && world.length === 16) {
-            this.transform.set(world);
-        } else {
-            for (let i = 0; i < 16 && i < world.length; i++) {
-                this.transform[i] = world[i];
-            }
+        if (this.instances.matrices.length < 16) {
+            this.instances.matrices = new Float32Array(16);
         }
 
+        if (world instanceof Float32Array && world.length === 16) {
+            this.instances.matrices.set(world, 0);
+        } else {
+            for (let i = 0; i < 16 && i < world.length; i++) {
+                this.instances.matrices[i] = world[i];
+            }
+        }
+        this.instances.count = 1;
+
         if (normal) {
-            if (!this.normalMatrix) {
-                this.normalMatrix = new Float32Array(16);
+            if (!this.instances.normalMatrices || this.instances.normalMatrices.length < 16) {
+                this.instances.normalMatrices = new Float32Array(16);
             }
             if (normal instanceof Float32Array && normal.length === 16) {
-                this.normalMatrix.set(normal);
+                this.instances.normalMatrices.set(normal, 0);
             } else {
                 for (let i = 0; i < 16 && i < normal.length; i++) {
-                    this.normalMatrix[i] = normal[i];
+                    this.instances.normalMatrices[i] = normal[i];
                 }
             }
+        }
+        return this;
+    }
+
+    /**
+     * Sets continuous matrix stream for multi-instance batches.
+     */
+    setInstances(
+        instances: Float32Array | InstanceData,
+        count?: number,
+        normalMatrices?: Float32Array
+    ): this {
+        if (instances instanceof Float32Array) {
+            this.instances.matrices = instances;
+            this.instances.count = count ?? Math.floor(instances.length / 16);
+            if (normalMatrices) {
+                this.instances.normalMatrices = normalMatrices;
+            }
+        } else {
+            this.instances = {
+                matrices: instances.matrices,
+                normalMatrices: instances.normalMatrices,
+                count: count ?? instances.count,
+            };
         }
         return this;
     }
@@ -213,15 +317,6 @@ export class Actor {
         } else {
             this.skin = joints;
         }
-        return this;
-    }
-
-    /**
-     * Sets instance matrices for instanced draws.
-     */
-    setInstances(instances: Float32Array, count?: number): this {
-        this.instances = instances;
-        this.instanceCount = count ?? Math.floor(instances.length / 16);
         return this;
     }
 }
