@@ -8,17 +8,12 @@ import {
     SlotFrequency,
     type BindingEntry,
 } from "@asciiz/atoolkit/awgpu";
-import type { MeshCmp, ShaderCmp, TransformCmp, SkinCmp } from "../components.js";
+import type { Actor } from "../actor.js";
 import type { ShaderParams } from "../types.js";
 import type { Camera } from "../camera.js";
 import { MeshWGPU } from "./mesh.js";
 import { ShaderWGPU } from "./shader.js";
 import { TextureWGPU } from "./texture.js";
-
-export interface ComponentQuerySource<T> {
-    get(entity: number): T | undefined;
-    readonly entities?: readonly number[];
-}
 
 /**
  * Execution target containing the external render pass and camera.
@@ -30,41 +25,14 @@ export interface RenderTarget {
 }
 
 /**
- * Scene component sources and optional entity filter.
- */
-export interface RenderScene {
-    /** Component set or query source for MeshCmp. */
-    meshes: ComponentQuerySource<MeshCmp>;
-    /** Component set or query source for ShaderCmp. */
-    shaders: ComponentQuerySource<ShaderCmp>;
-    /** Optional component set or query source for TransformCmp. */
-    transforms?: ComponentQuerySource<TransformCmp>;
-    /** Optional component set or query source for SkinCmp. */
-    skins?: ComponentQuerySource<SkinCmp>;
-    /**
-     * Optional iterable of entity IDs to draw.
-     * If omitted, automatically derived from meshes if it exposes an `entities` array.
-     */
-    entities?: Iterable<number>;
-}
-
-/**
- * Unified render options combining render target and scene context.
+ * Unified render options combining render target and iterable Actors.
  */
 export interface RenderOptions extends RenderTarget {
-    /** Optional nested scene context, or specify meshes/shaders/transforms directly on this options object. */
-    scene?: RenderScene;
-
-    // Direct scene properties for convenience:
-    meshes?: ComponentQuerySource<MeshCmp>;
-    shaders?: ComponentQuerySource<ShaderCmp>;
-    transforms?: ComponentQuerySource<TransformCmp>;
-    skins?: ComponentQuerySource<SkinCmp>;
-    entities?: Iterable<number>;
+    actors?: Iterable<Actor>;
 }
 
 /**
- * Options for directly drawing a single mesh with a shader (zero ECS required).
+ * Options for directly drawing a single mesh with a shader (zero Actor required).
  */
 export interface DrawMeshOptions extends RenderTarget {
     mesh: MeshWGPU;
@@ -102,9 +70,9 @@ const IDENTITY_MAT4 = new Float32Array([
  * Operates purely as a submesh drawing operator inside a caller-orchestrated render pass.
  *
  * Implements a frequency-slotted WebGPU binding model:
- *   Slot 0 (PerFrame): Camera uniforms (bound once per pass/camera)
+ *   Slot 0 (PerFrame): Camera uniforms (bound once per pass/camera, supports per-Actor camera override)
  *   Slot 1 (PerBatch): Material parameters, textures, samplers (cached via BindTableCache)
- *   Slot 2 (PerInstance): Entity transforms with 256-byte aligned dynamic offsets
+ *   Slot 2 (PerInstance): Dynamic transforms with 256-byte aligned dynamic offsets
  */
 export class MeshRendererWGPU {
     device?: GPUDevice;
@@ -116,10 +84,9 @@ export class MeshRendererWGPU {
     private _lastCameraData = new Float32Array(52);
     private _cameraInitialized = false;
 
-    // Entity dynamic uniform buffer & CPU staging array (aligned to 256 bytes = 64 floats per entity)
+    // Dynamic transform uniform buffer & CPU staging array (aligned to 256 bytes = 64 floats per instance)
     private _transformBuffer?: Buffer;
     private _transformStaging = new Float32Array(1024 * 64);
-    private _transformBindTable?: BindTable;
 
     // Fallback assets
     private _fallbackTexture?: TextureWGPU;
@@ -159,18 +126,24 @@ export class MeshRendererWGPU {
     }
 
     /**
-     * Executes render pass across active entities using an external render pass and Camera.
+     * Draws a single Actor inside the specified render pass.
+     */
+    draw(target: RenderTarget, actor: Actor): void {
+        this.render(target, [actor]);
+    }
+
+    /**
+     * Executes render pass across an iterable of Actor instances using an external render pass and Camera.
      */
     render(
         targetOrOptions: RenderOptions | RenderTarget,
-        sceneArg?: RenderScene
+        actorsArg?: Iterable<Actor>
     ): void {
-        const isTwoArgs = sceneArg !== undefined;
         const target = targetOrOptions as RenderTarget;
         const options = targetOrOptions as RenderOptions;
 
         const pass = target.pass;
-        const camera = target.camera;
+        const defaultCamera = target.camera;
         const device = target.device ?? this.device;
 
         if (!pass) {
@@ -178,7 +151,7 @@ export class MeshRendererWGPU {
                 "[MeshRendererWGPU] Render pass was not provided! Pass a valid GPURenderPassEncoder in options: { pass, ... }."
             );
         }
-        if (!camera) {
+        if (!defaultCamera) {
             throw new Error(
                 "[MeshRendererWGPU] Camera was not provided! Pass a valid Camera instance in options: { camera, ... }."
             );
@@ -189,103 +162,73 @@ export class MeshRendererWGPU {
             );
         }
 
-        const scene = isTwoArgs ? sceneArg! : (options.scene ?? options);
-        const meshSet = scene.meshes;
-        const shaderSet = scene.shaders;
-        const transformSet = scene.transforms;
+        const actors = actorsArg ?? options.actors;
+        if (!actors) return;
 
-        if (!meshSet) {
-            throw new Error(
-                "[MeshRendererWGPU] Scene meshes source was not provided! Pass meshes in options: { meshes: meshSet, ... }."
-            );
-        }
-        if (!shaderSet) {
-            throw new Error(
-                "[MeshRendererWGPU] Scene shaders source was not provided! Pass shaders in options: { shaders: shaderSet, ... }."
-            );
-        }
+        // 1. Collect active actors and filter valid hardware meshes
+        const activeActors: Actor[] = [];
+        let count = 0;
 
-        // Derive entities iterable
-        const entities: Iterable<number> | undefined = scene.entities ?? (
-            ("entities" in meshSet && Array.isArray((meshSet as any).entities))
-                ? (meshSet as any).entities
-                : undefined
-        );
-        if (!entities) {
-            throw new Error(
-                "[MeshRendererWGPU] Entities list could not be automatically determined from meshes. Please pass entities in options: { entities, ... }."
-            );
+        for (const actor of actors) {
+            if (!(actor.mesh instanceof MeshWGPU)) continue;
+            if (actor.shaders.length === 0) continue;
+
+            activeActors.push(actor);
+            count++;
         }
 
-        // 1. Collect active entities and stage their transforms into _transformStaging
-        const activeEntities: number[] = [];
-        let entityCount = 0;
+        if (count === 0) return;
 
-        for (const entity of entities) {
-            const meshCmp = meshSet.get(entity);
-            if (!meshCmp || !meshCmp.visible) continue;
-            if (!(meshCmp.mesh instanceof MeshWGPU)) continue;
-            const shaderCmp = shaderSet.get(entity);
-            if (!shaderCmp) continue;
-
-            activeEntities.push(entity);
-            entityCount++;
-        }
-
-        if (entityCount === 0) return;
-
-        // Ensure transform staging and GPU buffer capacity (256 bytes = 64 floats per entity)
-        const requiredFloats = entityCount * 64;
+        // Ensure transform staging and GPU buffer capacity (256 bytes = 64 floats per instance)
+        const requiredFloats = count * 64;
         if (this._transformStaging.length < requiredFloats) {
             this._transformStaging = new Float32Array(Math.max(requiredFloats, this._transformStaging.length * 2));
         }
 
-        const requiredBytes = entityCount * 256;
+        const requiredBytes = count * 256;
         if (!this._transformBuffer || this._transformBuffer.size < requiredBytes) {
             this._transformBuffer?.destroy();
             const allocSize = Math.max(requiredBytes, 65536);
             this._transformBuffer = Buffer.createUniform(device, allocSize, "MeshRenderer_TransformBuffer");
-            this._transformBindTable = undefined;
         }
 
         // Write model and normal matrices into staging array
-        for (let i = 0; i < entityCount; i++) {
-            const entity = activeEntities[i];
-            const transformCmp = transformSet?.get(entity);
+        for (let i = 0; i < count; i++) {
+            const actor = activeActors[i];
             const floatOffset = i * 64;
 
-            if (transformCmp) {
-                this._transformStaging.set(transformCmp.worldMatrix, floatOffset);
-                if (transformCmp.normalMatrix) {
-                    this._transformStaging.set(transformCmp.normalMatrix, floatOffset + 16);
-                } else {
-                    this._transformStaging.set(transformCmp.worldMatrix, floatOffset + 16);
-                }
+            this._transformStaging.set(actor.transform, floatOffset);
+            if (actor.normalMatrix) {
+                this._transformStaging.set(actor.normalMatrix, floatOffset + 16);
             } else {
-                this._transformStaging.set(IDENTITY_MAT4, floatOffset);
-                this._transformStaging.set(IDENTITY_MAT4, floatOffset + 16);
+                this._transformStaging.set(actor.transform, floatOffset + 16);
             }
         }
 
         // Upload transforms in one single batch
         this._transformBuffer.write(device, this._transformStaging.subarray(0, requiredFloats), 0);
 
-        // 2. Setup Camera Uniforms (Slot 0)
-        this._updateCameraBuffer(device, camera);
-
-        // 3. Render loop with state filtering
+        // 2. Render loop with state filtering & per-Actor camera override
         let lastBoundPipeline: GPURenderPipeline | undefined;
         let lastBoundMesh: MeshWGPU | undefined;
         let lastBoundMaterial: BindTable | undefined;
         let lastBoundCameraTable: BindTable | undefined;
+        let currentBoundCamera: Camera | undefined;
 
-        for (let i = 0; i < entityCount; i++) {
-            const entity = activeEntities[i];
-            const meshCmp = meshSet.get(entity)!;
-            const mesh = meshCmp.mesh as MeshWGPU;
-            const shaderCmp = shaderSet.get(entity)!;
+        for (let i = 0; i < count; i++) {
+            const actor = activeActors[i];
+            const mesh = actor.mesh as MeshWGPU;
             const submeshes = mesh.submeshes;
             const dynamicOffset = i * 256;
+            const instanceCount = actor.instanceCount > 0 ? actor.instanceCount : 1;
+            const effectiveCamera = actor.camera ?? defaultCamera;
+
+            // Camera update (Slot 0): check if camera changed
+            if (currentBoundCamera !== effectiveCamera) {
+                this._updateCameraBuffer(device, effectiveCamera);
+                currentBoundCamera = effectiveCamera;
+                lastBoundCameraTable = undefined; // Force camera bind table re-evaluation
+            }
 
             // Bind vertex and index buffers once per mesh
             if (lastBoundMesh !== mesh) {
@@ -299,7 +242,7 @@ export class MeshRendererWGPU {
 
             // Iterate submeshes
             for (let s = 0; s < submeshes.length; s++) {
-                const shader = shaderCmp.shaders[s];
+                const shader = actor.shaders[s] ?? actor.shaders[0];
                 if (!shader || !(shader instanceof ShaderWGPU)) continue;
 
                 const submesh = submeshes[s];
@@ -315,8 +258,13 @@ export class MeshRendererWGPU {
 
                 if (isLegacyLayout) {
                     // Legacy Group 0: Combined Entity + Camera
-                    const transformCmp = transformSet?.get(entity);
-                    const legacyGroup0 = this._createLegacyGroup0(device, shader, camera, transformCmp);
+                    const legacyGroup0 = this._createLegacyGroup0(
+                        device,
+                        shader,
+                        effectiveCamera,
+                        actor.transform,
+                        actor.normalMatrix
+                    );
                     if (legacyGroup0) pass.setBindGroup(0, legacyGroup0);
                 } else {
                     // Modern Slot 0: Camera (PerFrame)
@@ -344,22 +292,23 @@ export class MeshRendererWGPU {
                 // Slot 1: Material Parameters (PerBatch)
                 const materialGroupIdx = shader.meta.materialGroupIndex ?? 1;
                 if (shader.bindGroupLayouts.length > materialGroupIdx) {
+                    const actorParams = actor.params[s] ?? actor.params[0];
                     const mergedParams: ShaderParams = {
                         floats: {
                             ...shader.defaultParams.floats,
-                            ...shaderCmp.params[s]?.floats,
+                            ...actorParams?.floats,
                         },
                         vectors: {
                             ...shader.defaultParams.vectors,
-                            ...shaderCmp.params[s]?.vectors,
+                            ...actorParams?.vectors,
                         },
                         textures: {
                             ...shader.defaultParams.textures,
-                            ...shaderCmp.params[s]?.textures,
+                            ...actorParams?.textures,
                         },
                         samplers: {
                             ...shader.defaultParams.samplers,
-                            ...shaderCmp.params[s]?.samplers,
+                            ...actorParams?.samplers,
                         },
                     };
 
@@ -374,20 +323,20 @@ export class MeshRendererWGPU {
                 if (mesh.indexBuffer) {
                     pass.drawIndexed(
                         submesh.indexCount,
-                        1,
+                        instanceCount,
                         submesh.firstIndex,
                         submesh.baseVertex ?? 0,
                         0
                     );
                 } else {
-                    pass.draw(submesh.indexCount, 1, submesh.firstIndex, 0);
+                    pass.draw(submesh.indexCount, instanceCount, submesh.firstIndex, 0);
                 }
             }
         }
     }
 
     /**
-     * Draws a single mesh with a shader directly (zero ECS required).
+     * Draws a single mesh with a shader directly (zero Actor required).
      */
     drawMesh(options: DrawMeshOptions): void {
         const pass = options.pass;
@@ -437,7 +386,6 @@ export class MeshRendererWGPU {
                 if (!this._transformBuffer || this._transformBuffer.size < 256) {
                     this._transformBuffer?.destroy();
                     this._transformBuffer = Buffer.createUniform(device, 65536, "MeshRenderer_TransformBuffer");
-                    this._transformBindTable = undefined;
                 }
 
                 const world = (options.worldMatrix as Float32Array) ?? IDENTITY_MAT4;
@@ -648,8 +596,8 @@ export class MeshRendererWGPU {
         device: GPUDevice,
         shader: ShaderWGPU,
         camera: Camera,
-        transformOrWorldMatrix?: TransformCmp | ArrayLike<number>,
-        normalMatrixOverride?: ArrayLike<number>
+        worldMatrix?: Float32Array | ArrayLike<number>,
+        normalMatrixOverride?: Float32Array | ArrayLike<number>
     ): GPUBindGroup | null {
         const layout = shader.bindGroupLayouts[0];
         if (!layout) return null;
@@ -662,22 +610,12 @@ export class MeshRendererWGPU {
         const entityBuf = this.uniformPool.acquire(device, entityBytes);
         const entityData = new Float32Array(32);
 
-        if (transformOrWorldMatrix) {
-            if ("worldMatrix" in (transformOrWorldMatrix as any)) {
-                const transform = transformOrWorldMatrix as TransformCmp;
-                entityData.set(transform.worldMatrix, 0);
-                if (transform.normalMatrix) {
-                    entityData.set(transform.normalMatrix, 16);
-                } else {
-                    entityData.set(transform.worldMatrix, 16);
-                }
+        if (worldMatrix) {
+            entityData.set(worldMatrix as ArrayLike<number>, 0);
+            if (normalMatrixOverride) {
+                entityData.set(normalMatrixOverride as ArrayLike<number>, 16);
             } else {
-                entityData.set(transformOrWorldMatrix as ArrayLike<number>, 0);
-                if (normalMatrixOverride) {
-                    entityData.set(normalMatrixOverride, 16);
-                } else {
-                    entityData.set(transformOrWorldMatrix as ArrayLike<number>, 16);
-                }
+                entityData.set(worldMatrix as ArrayLike<number>, 16);
             }
         } else {
             entityData.set(IDENTITY_MAT4, 0);

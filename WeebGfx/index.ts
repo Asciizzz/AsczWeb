@@ -14,8 +14,13 @@ export { TextureCPU, TextureGPU } from "./texture.js";
 export { ShaderGPU } from "./shader.js";
 export { Camera, type CameraProjectionMode } from "./camera.js";
 
-// Live ECS Components (*Cmp)
-export { MeshCmp, ShaderCmp, TransformCmp, SkinCmp, CameraCmp } from "./components.js";
+// Actor (Core atomic drawing unit)
+export {
+    Actor,
+    type ActorOptions,
+    type SkinData,
+    type MorphData,
+} from "./actor.js";
 
 // WebGPU Backend Subsystem (Powered by Atoolkit/awgpu)
 export * as webgpu from "./wgpu/index.js";
@@ -27,7 +32,6 @@ export {
     RendererWGPU,
     ShaderGraphWGPU,
     type RenderTarget,
-    type RenderScene,
     type RenderOptions,
     type DrawMeshOptions,
     type MeshRendererOptions,

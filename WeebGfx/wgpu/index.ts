@@ -8,9 +8,7 @@ export {
 export {
     MeshRendererWGPU,
     RendererWGPU,
-    type ComponentQuerySource,
     type RenderTarget,
-    type RenderScene,
     type RenderOptions,
     type DrawMeshOptions,
     type MeshRendererOptions,
