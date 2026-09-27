@@ -10,14 +10,15 @@ Repository centers on `Atoolkit` as foundational computational layer, `WeebGfx` 
 
 `Atoolkit` provides zero-dependency computational modules designed for composability and raw hardware throughput:
 
-| Package | Role | Key Capabilities | Documentation |
-| :--- | :--- | :--- | :--- |
-| **[`aecs`](./Atoolkit/aecs/ReadMe.md)** | Entity Component System | Sparse-dense storage (`ComponentSet`, `FloatSet`) with O(1) mutations, cache-coherent dense iteration, and dynamic set intersection joins (`join2`, `join3`). | [aecs ReadMe](./Atoolkit/aecs/ReadMe.md) |
-| **[`acircuit`](./Atoolkit/acircuit/ReadMe.md)** | Value Computation Circuit | Directed computation circuit with typed socket endpoints (`Socket`), 1-to-N fan-out (`Wire`), computational chips (`Chip`), composite subcircuits (`Subcircuit`), Kahn topological ordering, and execution plan caching. | [acircuit ReadMe](./Atoolkit/acircuit/ReadMe.md) |
-| **[`awgpu`](./Atoolkit/awgpu/ReadMe.md)** | Hardware WebGPU Engine | Domain-agnostic GPU execution engine featuring multi-pass render targets, 4-tier frequency bind slots, automated vertex strides, command pooling, and depth-only pipeline passes. | [awgpu ReadMe](./Atoolkit/awgpu/ReadMe.md) |
-| **[`alm`](./Atoolkit/alm/ReadMe.md)** | 3D Linear Algebra | Native `Float32Array` vectors and matrices (`Mat4`, `Mat3`, `Vec2`, `Vec3`, `Vec4`, `Quat`, `Ray`, `AABB`, `Frustum`) supporting WebGPU [0, 1] clip space and out-parameter zero-allocation calls. | [alm ReadMe](./Atoolkit/alm/ReadMe.md) |
-| **[`atempo`](./Atoolkit/atempo/ReadMe.md)** | Temporal Orchestration & Cadence | Continuous and stepped timeline sequencing (`Track`, `Clip`, `Curve`), analytical harmonic spring dynamics (`Spring`), exponential decays (`Cadence`, `FixedCadence`), and cyclic metronome phase coordinates (`Phase`, `Metronome`). | [atempo ReadMe](./Atoolkit/atempo/ReadMe.md) |
-| **[`adiag`](./Atoolkit/adiag/ReadMe.md)** | Diagnostic Telemetry Bus | Structured diagnostics bus (`Bus`, `Result`) with circular ring buffer logging (default 1000 entries), templated message compilation, and pointer-based causal error chaining (`ref`). | [adiag ReadMe](./Atoolkit/adiag/ReadMe.md) |
+| Package | Role | Key Capabilities |
+| :--- | :--- | :--- |
+| **[`aecs`](./Atoolkit/aecs/ReadMe.md)** | Entity Component System | Sparse-dense storage (`ComponentSet`, `FloatSet`) with O(1) mutations, cache-coherent dense iteration, and dynamic set intersection joins (`join2`, `join3`). |
+| **[`acircuit`](./Atoolkit/acircuit/ReadMe.md)** | Value Computation Circuit | Directed computation circuit with typed socket endpoints (`Socket`), 1-to-N fan-out (`Wire`), computational chips (`Chip`), composite subcircuits (`Subcircuit`), Kahn topological ordering, and execution plan caching. |
+| **[`awgpu`](./Atoolkit/awgpu/ReadMe.md)** | Hardware WebGPU Engine | Domain-agnostic GPU execution engine featuring multi-pass render targets, 4-tier frequency bind slots, automated vertex strides, command pooling, and depth-only pipeline passes. |
+| **[`alm`](./Atoolkit/alm/ReadMe.md)** | 3D Linear Algebra | Native `Float32Array` vectors and matrices (`Mat4`, `Mat3`, `Vec2`, `Vec3`, `Vec4`, `Quat`, `Ray`, `AABB`, `Frustum`) supporting WebGPU [0, 1] clip space and out-parameter zero-allocation calls. |
+| **[`atempo`](./Atoolkit/atempo/ReadMe.md)** | Temporal Orchestration & Cadence | Continuous and stepped timeline sequencing (`Track`, `Clip`, `Curve`), analytical harmonic spring dynamics (`Spring`), exponential decays (`Cadence`, `FixedCadence`), and cyclic metronome phase coordinates (`Phase`, `Metronome`). |
+| **[`adiag`](./Atoolkit/adiag/ReadMe.md)** | Diagnostic Telemetry Bus | Structured diagnostics bus (`Bus`, `Result`) with circular ring buffer logging (default 1000 entries), templated message compilation, and pointer-based causal error chaining (`ref`). |
+| **[`awasm`](./Atoolkit/awasm/ReadMe.md)** | WebAssembly Computational Runtime | Linear memory coordination, intrusive block pooling, detachment-resilient typed views, and lock-free worker pool dispatch. |
 
 ---
 
