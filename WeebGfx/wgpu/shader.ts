@@ -18,9 +18,11 @@ export interface ShaderGroupMetaWGPU {
     cameraGroupIndex?: number;
     materialGroupIndex?: number;
     entityGroupIndex?: number;
+    skinGroupIndex?: number;
     hasCamera: boolean;
     hasMaterial: boolean;
     hasEntityTransform: boolean;
+    hasSkin: boolean;
 }
 
 /**
@@ -53,9 +55,11 @@ export class ShaderWGPU extends ShaderGPU {
             hasCamera: meta?.hasCamera ?? (wgslCode.includes("u_camera") || wgslCode.includes("CameraUniforms")),
             hasMaterial: meta?.hasMaterial ?? (wgslCode.includes("u_material") || (paramBindings && (paramBindings.hasMaterialUniform || paramBindings.textures.length > 0 || paramBindings.samplers.length > 0)) || false),
             hasEntityTransform: meta?.hasEntityTransform ?? (wgslCode.includes("u_entity") || wgslCode.includes("EntityUniforms")),
+            hasSkin: meta?.hasSkin ?? (wgslCode.includes("u_skin") || wgslCode.includes("SkinUniforms")),
             cameraGroupIndex: meta?.cameraGroupIndex ?? 0,
             materialGroupIndex: meta?.materialGroupIndex ?? 1,
             entityGroupIndex: meta?.entityGroupIndex ?? 2,
+            skinGroupIndex: meta?.skinGroupIndex ?? 3,
         };
     }
 

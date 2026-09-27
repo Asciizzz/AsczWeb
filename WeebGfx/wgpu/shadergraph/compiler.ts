@@ -18,6 +18,7 @@ import {
     OutputVertexNode,
     OutputFragmentNode,
     EntityTransformNode,
+    SkinTransformNode,
     SampleTextureNode,
     TextureFetchNode,
     AddNode,
@@ -189,7 +190,7 @@ export class ShaderGraphWGPU {
         // Trace backward from OutputVertex
         const vertexQueue: string[] = [];
         for (const n of this.nodes.values()) {
-            if (n.type === "OutputVertex" || n.type === "InputVertex" || n.type === "EntityTransform") {
+            if (n.type === "OutputVertex" || n.type === "InputVertex" || n.type === "EntityTransform" || n.type === "SkinTransform") {
                 vertexQueue.push(n.id);
                 nodeStages.set(n.id, "vertex");
             }
@@ -255,7 +256,8 @@ export class ShaderGraphWGPU {
             }
         }
 
-        const hasEntityTransform = Array.from(this.nodes.values()).some((n) => n.type === "EntityTransform");
+        const hasSkin = Array.from(this.nodes.values()).some((n) => n.type === "SkinTransform");
+        const hasEntityTransform = hasSkin || Array.from(this.nodes.values()).some((n) => n.type === "EntityTransform");
         const hasCamera = Array.from(this.nodes.values()).some(
             (n) => n instanceof CameraNode || n instanceof UniformMatrixNode
         );
@@ -394,6 +396,15 @@ export class ShaderGraphWGPU {
             codeLines.push("");
         }
 
+        // Group 3: Skinning Joint Uniforms (SlotFrequency.PerInstance)
+        if (hasSkin) {
+            codeLines.push("struct SkinUniforms {");
+            codeLines.push("    joints: array<mat4x4<f32>, 64>,");
+            codeLines.push("};");
+            codeLines.push("@group(3) @binding(0) var<uniform> u_skin: SkinUniforms;");
+            codeLines.push("");
+        }
+
         const getNodeOutputExpr = (nodeId: string, socketId: string): string => {
             const fromNode = this.nodes.get(nodeId);
             if (!fromNode) return "vec4<f32>(1.0, 1.0, 1.0, 1.0)";
@@ -401,7 +412,7 @@ export class ShaderGraphWGPU {
             if (fromNode instanceof InputVertexNode) {
                 return `in.${fromNode.attributeName}`;
             }
-            if (fromNode instanceof EntityTransformNode) {
+            if (fromNode instanceof EntityTransformNode || fromNode instanceof SkinTransformNode) {
                 return socketId === "out_position" ? `${fromNode.id}_pos` : `${fromNode.id}_norm`;
             }
             if (fromNode instanceof FloatNode) {
@@ -488,12 +499,39 @@ export class ShaderGraphWGPU {
                 } else {
                     codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz;`);
                 }
+            } else if (node instanceof SkinTransformNode) {
+                const inPos = getExpr(node.id, "in_position", "vertex");
+                const inJoints = getExpr(node.id, "in_joints", "vertex");
+                const inWeights = getExpr(node.id, "in_weights", "vertex");
+
+                const connJoints = this.connections.find((c) => c.toNodeId === node.id && c.toSocketId === "in_joints");
+                const fromJointsNode = connJoints ? this.nodes.get(connJoints.fromNodeId) : undefined;
+                const isFloatJoints = fromJointsNode && fromJointsNode instanceof InputVertexNode && fromJointsNode.dataType === "vec4<f32>";
+                const jx = isFloatJoints ? `u32(${inJoints}.x)` : `${inJoints}.x`;
+                const jy = isFloatJoints ? `u32(${inJoints}.y)` : `${inJoints}.y`;
+                const jz = isFloatJoints ? `u32(${inJoints}.z)` : `${inJoints}.z`;
+                const jw = isFloatJoints ? `u32(${inJoints}.w)` : `${inJoints}.w`;
+
+                codeLines.push(`    let ${node.id}_skin_mat =`);
+                codeLines.push(`        ${inWeights}.x * u_skin.joints[${jx}] +`);
+                codeLines.push(`        ${inWeights}.y * u_skin.joints[${jy}] +`);
+                codeLines.push(`        ${inWeights}.z * u_skin.joints[${jz}] +`);
+                codeLines.push(`        ${inWeights}.w * u_skin.joints[${jw}];`);
+                codeLines.push(`    let ${node.id}_pos = (u_entity.modelMatrix * (${node.id}_skin_mat * vec4<f32>(${inPos}, 1.0))).xyz;`);
+
+                const hasNormConn = this.connections.some((c) => c.toNodeId === node.id && c.toSocketId === "in_normal");
+                if (hasNormConn) {
+                    const inNorm = getExpr(node.id, "in_normal", "vertex");
+                    codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * (${node.id}_skin_mat * vec4<f32>(${inNorm}, 0.0))).xyz;`);
+                } else {
+                    codeLines.push(`    let ${node.id}_norm = (u_entity.normalMatrix * (${node.id}_skin_mat * vec4<f32>(0.0, 1.0, 0.0, 0.0))).xyz;`);
+                }
             } else if (node instanceof MultiplyNode) {
                 const a = getExpr(node.id, "a", "vertex");
                 const b = getExpr(node.id, "b", "vertex");
                 const connB = this.connections.find((c) => c.toNodeId === node.id && c.toSocketId === "b");
                 const fromB = connB ? this.nodes.get(connB.fromNodeId) : undefined;
-                const isBVec3 = fromB && (fromB instanceof EntityTransformNode || (fromB instanceof InputVertexNode && fromB.dataType === "vec3<f32>"));
+                const isBVec3 = fromB && (fromB instanceof EntityTransformNode || fromB instanceof SkinTransformNode || (fromB instanceof InputVertexNode && fromB.dataType === "vec3<f32>"));
                 if (isBVec3 && node.dataType === "vec4<f32>") {
                     codeLines.push(`    let ${node.id}_out = ${a} * vec4<f32>(${b}, 1.0);`);
                 } else {
@@ -574,9 +612,11 @@ export class ShaderGraphWGPU {
             hasCamera,
             hasMaterial: hasMaterialUniform || paramTextures.length > 0 || paramSamplers.length > 0,
             hasEntityTransform,
+            hasSkin,
             cameraGroupIndex: 0,
             materialGroupIndex: 1,
             entityGroupIndex: 2,
+            skinGroupIndex: 3,
         };
 
         return {
@@ -705,6 +745,14 @@ export class ShaderGraphWGPU {
                 .addUniform(0, STAGE_VERTEX, { hasDynamicOffset: true, minBindingSize: 128 })
                 .build(device, "WeebGfx_Group2_EntityLayout");
             bindLayouts.push(entityLayout);
+        }
+
+        // Group 3: Skinning Joint Uniforms (SlotFrequency.PerInstance)
+        if (meta.hasSkin) {
+            const skinLayout = BindLayout.builder()
+                .addUniform(0, STAGE_VERTEX, { minBindingSize: 64 * 64 })
+                .build(device, "WeebGfx_Group3_SkinLayout");
+            bindLayouts.push(skinLayout);
         }
 
         const rawBindGroupLayouts = bindLayouts.map((l) => l.native);

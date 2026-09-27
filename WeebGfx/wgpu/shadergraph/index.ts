@@ -4,6 +4,7 @@ export {
     OutputVertexNode,
     OutputFragmentNode,
     EntityTransformNode,
+    SkinTransformNode,
     FloatNode,
     Vec2Node,
     Vec3Node,

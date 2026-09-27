@@ -8,7 +8,7 @@ import {
     SlotFrequency,
     type BindingEntry,
 } from "@asciiz/atoolkit/awgpu";
-import type { Actor } from "../actor.js";
+import type { Actor, SkinData } from "../actor.js";
 import type { ShaderParams } from "../types.js";
 import type { Camera } from "../camera.js";
 import { MeshWGPU } from "./mesh.js";
@@ -316,6 +316,17 @@ export class MeshRendererWGPU {
                     }
                 }
 
+                // Slot 3: Skin Joints (PerInstance)
+                if (shader.meta.hasSkin && actor.skin) {
+                    const skinGroupIdx = shader.meta.skinGroupIndex ?? 3;
+                    if (shader.bindGroupLayouts.length > skinGroupIdx) {
+                        const skinTable = this._getSkinBindTable(device, shader, actor.skin);
+                        if (skinTable) {
+                            pass.setBindGroup(skinGroupIdx, skinTable.native);
+                        }
+                    }
+                }
+
                 // Issue Draw Call
                 if (mesh.indexBuffer) {
                     pass.drawIndexed(
@@ -584,6 +595,37 @@ export class MeshRendererWGPU {
             slot: SlotFrequency.PerBatch,
             label: "Material_BindTable",
         });
+    }
+
+    private _getSkinBindTable(
+        device: GPUDevice,
+        shader: ShaderWGPU,
+        skin: SkinData
+    ): BindTable | null {
+        const skinGroupIdx = shader.meta.skinGroupIndex ?? 3;
+        const layout = shader.bindGroupLayouts[skinGroupIdx];
+        if (!layout) return null;
+
+        const byteSize = Math.max(4096, skin.jointMatrices.byteLength);
+        const skinBuf = this.uniformPool.acquire(device, byteSize);
+        skinBuf.write(device, skin.jointMatrices);
+
+        return this.bindTableCache.getOrCreate(
+            device,
+            layout,
+            [{
+                binding: 0,
+                resource: {
+                    buffer: skinBuf.native,
+                    offset: 0,
+                    size: byteSize,
+                },
+            }],
+            {
+                slot: SlotFrequency.PerInstance,
+                label: "Skin_BindTable",
+            }
+        );
     }
 
     /**

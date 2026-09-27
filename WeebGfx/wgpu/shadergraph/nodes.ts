@@ -133,6 +133,32 @@ export class EntityTransformNode implements Node {
 }
 
 /**
+ * Transforms vertex position and normal using weighted skeletal joint matrices.
+ */
+export class SkinTransformNode implements Node {
+    id: string;
+    type = "SkinTransform";
+    stage: "vertex" = "vertex";
+
+    inputs: Socket[];
+    outputs: Socket[];
+
+    constructor(id = "skin_transform") {
+        this.id = id;
+        this.inputs = [
+            { id: "in_position", name: "in_position", dataType: "vec3<f32>", isInput: true },
+            { id: "in_normal", name: "in_normal", dataType: "vec3<f32>", isInput: true },
+            { id: "in_joints", name: "in_joints", dataType: "vec4<u32>", isInput: true },
+            { id: "in_weights", name: "in_weights", dataType: "vec4<f32>", isInput: true },
+        ];
+        this.outputs = [
+            { id: "out_position", name: "out_position", dataType: "vec3<f32>", isInput: false },
+            { id: "out_normal", name: "out_normal", dataType: "vec3<f32>", isInput: false },
+        ];
+    }
+}
+
+/**
  * Scalar float value or parameter node.
  * When isParam is true (default), the value acts as the fallback default
  * when no float value is provided in the entity's ShaderCmp slot.
