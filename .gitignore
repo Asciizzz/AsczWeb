@@ -17,3 +17,5 @@ tests/
 # Plans and design drafts
 plan.md
 *plan.md
+npm-guide.md
+*guide.md

@@ -65,14 +65,6 @@
     "./adiag/*": {
       "types": "./dist/adiag/*.d.ts",
       "import": "./dist/adiag/*.js"
-    },
-    "./awgpu_old": {
-      "types": "./dist/awgpu_old/index.d.ts",
-      "import": "./dist/awgpu_old/index.js"
-    },
-    "./awgpu_old/*": {
-      "types": "./dist/awgpu_old/*.d.ts",
-      "import": "./dist/awgpu_old/*.js"
     }
   },
   "files": [
