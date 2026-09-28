@@ -78,7 +78,9 @@ export interface Submesh {
     firstIndex: number;
     indexCount: number;
     baseVertex?: number;
+    materialIndex?: number;
 }
+
 
 export interface ShaderParams {
     floats?: Record<string, number>;

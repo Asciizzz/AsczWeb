@@ -190,7 +190,51 @@ const shader = graph.compile(device, {
 
 ---
 
+## Model Loading Subsystem
+
+Decoupled model loading separates CPU asset parsing from WebGPU hardware allocation. Geometry hierarchies are flattened into unified meshes with submesh slices, static transforms are baked into vertex positions, and skeletal hierarchies are extracted into `SkeletonCPU`.
+
+### Decoupled Asset Pipeline
+
+```typescript
+import { loadGLTF, parseGLB, ModelWGPU } from "@asciiz/weebgfx";
+
+// 1. Pure CPU asset parsing (browser, worker, or server runtime)
+const modelCpu = await loadGLTF("assets/character.glb");
+
+// 2. Hardware WebGPU bridge: uploads buffers, textures, and compiles pipelines
+const modelGpu = ModelWGPU.create(device, modelCpu);
+
+// 3. Actor factory: stamps independent render units with separate transform streams
+const heroActor = modelGpu.createActor();
+const enemyActor = modelGpu.createActor({
+    transform: enemyWorldMatrix,
+});
+```
+
+### SkeletonCPU
+
+`SkeletonCPU` maintains joint hierarchies, rest poses, and evaluates forward kinematics into contiguous skin matrix streams for Group 3 skin uniforms.
+
+```typescript
+import { SkeletonCPU } from "@asciiz/weebgfx";
+
+const skeleton = new SkeletonCPU();
+const root = skeleton.addJoint("root", -1, rootLocalMatrix, rootInvBind);
+const spine = skeleton.addJoint("spine", root, spineLocalMatrix, spineInvBind);
+
+// Evaluates parent-child forward kinematics (JointMatrix = WorldMatrix * InverseBindMatrix)
+const jointMatrices = skeleton.computeJointMatrices();
+actor.setSkin(jointMatrices, skeleton.jointCount);
+```
+
+- `addJoint(name, parentIndex, localMatrix?, inverseBindMatrix?)`: Appends joint node to hierarchy.
+- `computeJointMatrices(localTransforms?, out?)`: Evaluates parent-child forward kinematics and flattens result into contiguous `Float32Array(count * 16)`.
+
+---
+
 ## Quick Start Example
+
 
 ```typescript
 import {

@@ -330,10 +330,11 @@ export class MeshRendererWGPU {
 
             // Iterate submeshes
             for (let s = 0; s < submeshes.length; s++) {
-                const shader = actor.shaders[s] ?? actor.shaders[0];
+                const submesh = submeshes[s];
+                const matIdx = submesh.materialIndex;
+                const shader = (matIdx !== undefined ? actor.shaders[matIdx] : undefined) ?? actor.shaders[s] ?? actor.shaders[0];
                 if (!shader || !(shader instanceof ShaderWGPU)) continue;
 
-                const submesh = submeshes[s];
 
                 // Set pipeline
                 if (lastBoundPipeline !== shader.pipeline.native) {
@@ -383,7 +384,8 @@ export class MeshRendererWGPU {
                 // Slot 1: Material Parameters (PerBatch)
                 const materialGroupIdx = shader.meta.materialGroupIndex ?? 1;
                 if (shader.bindGroupLayouts.length > materialGroupIdx) {
-                    const actorParams = actor.params[s] ?? actor.params[0];
+                    const actorParams = (matIdx !== undefined ? actor.params[matIdx] : undefined) ?? actor.params[s] ?? actor.params[0];
+
                     const mergedParams: ShaderParams = {
                         floats: {
                             ...shader.defaultParams.floats,

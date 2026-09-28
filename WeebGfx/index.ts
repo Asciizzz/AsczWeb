@@ -22,6 +22,34 @@ export {
     type MorphData,
 } from "./actor.js";
 
+// Skeleton & Hierarchical Animation
+export {
+    SkeletonCPU,
+    type JointData,
+} from "./skeleton.js";
+
+// Decoupled Model Loading Subsystem
+export * as loader from "./loader/index.js";
+export {
+    ModelGPU,
+    type ModelCPU,
+    type MaterialData,
+} from "./loader/model.js";
+export {
+    ModelWGPU,
+    type ModelWGPUOptions,
+} from "./loader/wgpu.js";
+export {
+    parseGLB,
+    parseGLTF,
+    parseGLTFJson,
+    loadGLTF,
+    unpackGLB,
+    type GLTFParseOptions,
+    type GLTFLoadOptions,
+    type GLTFBufferMap,
+} from "./loader/gltf.js";
+
 // WebGPU Backend Subsystem (Powered by Atoolkit/awgpu)
 export * as webgpu from "./wgpu/index.js";
 export {
@@ -37,3 +65,4 @@ export {
     type MeshRendererOptions,
 } from "./wgpu/index.js";
 export * from "./wgpu/shadergraph/index.js";
+
