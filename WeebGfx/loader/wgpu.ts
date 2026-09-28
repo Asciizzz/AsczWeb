@@ -21,11 +21,18 @@ import type { SkeletonCPU } from "../skeleton.js";
 import { ModelGPU, type ModelCPU, type MaterialData } from "./model.js";
 
 export interface ModelWGPUOptions {
+    /** Target render pass color format. Defaults to "bgra8unorm". */
+    targetFormat?: GPUTextureFormat;
+    /** Depth attachment format (e.g. "depth24plus"). If specified, enables depth testing and writes. */
+    depthFormat?: GPUTextureFormat;
+    /** Primitive face cull mode. Defaults to "none". */
+    cullMode?: GPUCullMode;
     /** Custom shader per material index or single fallback shader. */
     shaders?: ShaderWGPU | (ShaderWGPU | null)[];
     /** Custom sampler descriptor for loaded textures. */
     samplerDescriptor?: GPUSamplerDescriptor;
 }
+
 
 /**
  * WebGPU hardware implementation of ModelGPU.
@@ -68,7 +75,8 @@ export class ModelWGPU extends ModelGPU {
     private static _compileDefaultShader(
         device: GPUDevice,
         isSkinned: boolean,
-        hasTexture: boolean
+        hasTexture: boolean,
+        options?: ModelWGPUOptions
     ): ShaderWGPU {
         const graph = new ShaderGraphWGPU();
 
@@ -148,7 +156,11 @@ export class ModelWGPU extends ModelGPU {
             graph.connect("u_baseColor", "value", "out_f", "color");
         }
 
-        return graph.compile(device);
+        return graph.compile(device, {
+            targetFormat: options?.targetFormat ?? "bgra8unorm",
+            depthFormat: options?.depthFormat,
+            cullMode: options?.cullMode ?? "none",
+        });
     }
 
     /**
@@ -192,16 +204,17 @@ export class ModelWGPU extends ModelGPU {
             } else {
                 if (hasTex) {
                     if (!cachedTexturedShader) {
-                        cachedTexturedShader = ModelWGPU._compileDefaultShader(device, isSkinned, true);
+                        cachedTexturedShader = ModelWGPU._compileDefaultShader(device, isSkinned, true, options);
                     }
                     shader = cachedTexturedShader;
                 } else {
                     if (!cachedUntexturedShader) {
-                        cachedUntexturedShader = ModelWGPU._compileDefaultShader(device, isSkinned, false);
+                        cachedUntexturedShader = ModelWGPU._compileDefaultShader(device, isSkinned, false, options);
                     }
                     shader = cachedUntexturedShader;
                 }
             }
+
 
             const baseColor = mat?.baseColorFactor ?? [1, 1, 1, 1];
             const p: ShaderParams = {
