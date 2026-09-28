@@ -121,17 +121,32 @@ export class Buffer {
     write(device: Device | GPUDevice, data: BufferSourceData, bufferOffset = 0): void {
         const queue = resolveQueue(device);
         const view = data as ArrayBufferView;
-        const byteLength = view.byteLength ?? (data as ArrayBuffer).byteLength;
-        const buffer = view.buffer ?? (data as ArrayBuffer);
-        const byteOffset = view.byteOffset ?? 0;
+        const rawByteLength = view.byteLength ?? (data as ArrayBuffer).byteLength;
+        const rawBuffer = view.buffer ?? (data as ArrayBuffer);
+        const rawByteOffset = view.byteOffset ?? 0;
+
+        let uploadBuffer: ArrayBuffer = rawBuffer as ArrayBuffer;
+        let uploadOffset = rawByteOffset;
+        let uploadLength = rawByteLength;
+
+        // WebGPU requires writeBuffer byte size and data offset to be multiples of 4
+        if (uploadLength % 4 !== 0 || uploadOffset % 4 !== 0) {
+            const paddedSize = Math.max(4, Math.ceil(uploadLength / 4) * 4);
+            const padded = new Uint8Array(paddedSize);
+            padded.set(new Uint8Array(uploadBuffer, uploadOffset, uploadLength));
+            uploadBuffer = padded.buffer;
+            uploadOffset = 0;
+            uploadLength = paddedSize;
+        }
 
         queue.writeBuffer(
             this.native,
             bufferOffset,
-            buffer as ArrayBuffer,
-            byteOffset,
-            byteLength
+            uploadBuffer,
+            uploadOffset,
+            uploadLength
         );
+
     }
 
     /**

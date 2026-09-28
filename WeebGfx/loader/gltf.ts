@@ -580,9 +580,11 @@ export function parseGLTFJson(
     const vertexUintView = new Uint32Array(vertexFloatBuffer.buffer);
 
     const useUint32Indices = totalVertices > 65535;
+    const indexCapacity = useUint32Indices ? totalIndices : totalIndices + (totalIndices % 2);
     const indexArray = useUint32Indices
-        ? new Uint32Array(totalIndices)
-        : new Uint16Array(totalIndices);
+        ? new Uint32Array(indexCapacity)
+        : new Uint16Array(indexCapacity);
+
 
     const submeshes: Submesh[] = [];
     let currentVertex = 0;
