@@ -12,7 +12,7 @@ Repository centers on `Atoolkit` as foundational computational layer, `WeebGfx` 
 
 | Package | Role | Key Capabilities |
 | :--- | :--- | :--- |
-| **[`aecs`](./Atoolkit/aecs/ReadMe.md)** | Entity Component System | Sparse-dense storage (`ComponentSet`, `FloatSet`) with O(1) mutations, cache-coherent dense iteration, and dynamic set intersection joins (`join2`, `join3`). |
+| **[`aecs`](./Atoolkit/aecs/ReadMe.md)** | Entity Component System | Sparse-dense storage (`ComponentSet`, `FloatSet`) with O(1) mutations, cache-coherent dense iteration, and dynamic set intersection joins (`query2`, `query3`). |
 | **[`acircuit`](./Atoolkit/acircuit/ReadMe.md)** | Value Computation Circuit | Directed computation circuit with typed socket endpoints (`Socket`), 1-to-N fan-out (`Wire`), computational chips (`Chip`), composite subcircuits (`Subcircuit`), Kahn topological ordering, and execution plan caching. |
 | **[`awgpu`](./Atoolkit/awgpu/ReadMe.md)** | Hardware WebGPU Engine | Domain-agnostic GPU execution engine featuring multi-pass render targets, 4-tier frequency bind slots, automated vertex strides, command pooling, and depth-only pipeline passes. |
 | **[`alm`](./Atoolkit/alm/ReadMe.md)** | 3D Linear Algebra | Native `Float32Array` vectors and matrices (`Mat4`, `Mat3`, `Vec2`, `Vec3`, `Vec4`, `Quat`, `Ray`, `AABB`, `Frustum`) supporting WebGPU [0, 1] clip space and out-parameter zero-allocation calls. |
@@ -27,8 +27,9 @@ Repository centers on `Atoolkit` as foundational computational layer, `WeebGfx` 
 `WeebGfx` implements an API-agnostic graphics architecture and WebGPU rendering pipeline built directly on `Atoolkit`:
 
 * **Core Resources**: CPU/GPU paired geometries (`MeshCPU`, `MeshGPU`), textures (`TextureCPU`, `TextureGPU`), shaders (`ShaderGPU`), and projection controllers (`Camera`).
-* **ECS Integration**: Native components (`MeshCmp`, `ShaderCmp`, `TransformCmp`, `SkinCmp`, `CameraCmp`) linking render resources directly to `aecs` entities.
-* **WebGPU Subsystem**: Hardware backend providing batch renderers (`RendererWGPU`, `MeshRendererWGPU`) and shader graph evaluation (`ShaderGraphWGPU`).
+* **Actor Model**: Atomic draw item (`Actor`) managing geometry, pass bucketing, instance transforms, and skeletal skinning joint data (`SkeletonCPU`).
+* **Model Loading**: Asset decoders for binary GLB and GLTF 2.0 containers (`parseGLB`, `parseGLTF`, `ModelWGPU`).
+* **WebGPU Subsystem**: Hardware backend providing multi-frequency draw dispatcher (`MeshRendererWGPU`) and node-based shader graph compilation (`ShaderGraphWGPU`).
 
 ---
 

@@ -178,7 +178,7 @@ WeebGfx enforces explicit shader bindings:
 
 `ShaderWGPU.create(device, options)` compiles raw WGSL pipelines directly while mapping them to the engine's 4-slot bind group architecture.
 
-This allows custom lighting, shadow passes, and post-processing pipelines to execute seamlessly inside `MeshRendererWGPU` alongside node-graph shaders.
+This allows custom lighting, shadow passes, and post-processing pipelines to execute directly inside `MeshRendererWGPU` alongside node-graph shaders.
 
 ### Engine Bind Group Slots
 
