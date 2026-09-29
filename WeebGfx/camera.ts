@@ -21,6 +21,7 @@ export class Camera {
     aspect = 1.0;
     near = 0.1;
     far = 1000.0;
+    reversedZ = true;
 
     // Orthographic bounds
     orthoLeft = -10;
@@ -38,22 +39,34 @@ export class Camera {
      */
     readonly uniformData = new Float32Array(52);
 
-    constructor(fovY = Math.PI / 4, aspect = 1.0, near = 0.1, far = 1000.0) {
+    constructor(fovY = Math.PI / 4, aspect = 1.0, near = 0.1, far = 1000.0, reversedZ = true) {
         this.fovY = fovY;
         this.aspect = aspect;
         this.near = near;
         this.far = far;
+        this.reversedZ = reversedZ;
         this.updateProjection();
         this.updateView();
     }
 
-    setPerspective(fovY: number, aspect: number, near = 0.1, far = 1000.0): this {
+    setPerspective(fovY: number, aspect: number, near = 0.1, far = 1000.0, reversedZ?: boolean): this {
         this.mode = "perspective";
         this.fovY = fovY;
         this.aspect = aspect;
         this.near = near;
         this.far = far;
+        if (reversedZ !== undefined) {
+            this.reversedZ = reversedZ;
+        }
         this.updateProjection();
+        return this;
+    }
+
+    setReversedZ(reversed: boolean): this {
+        if (this.reversedZ !== reversed) {
+            this.reversedZ = reversed;
+            this.updateProjection();
+        }
         return this;
     }
 
@@ -109,17 +122,58 @@ export class Camera {
 
     updateProjection(): this {
         if (this.mode === "perspective") {
-            Mat4.perspectiveZO(this.fovY, this.aspect, this.near, this.far, this.projMatrix);
+            if (this.reversedZ) {
+                const f = 1.0 / Math.tan(this.fovY * 0.5);
+                this.projMatrix[0] = f / this.aspect;
+                this.projMatrix[1] = 0;
+                this.projMatrix[2] = 0;
+                this.projMatrix[3] = 0;
+
+                this.projMatrix[4] = 0;
+                this.projMatrix[5] = f;
+                this.projMatrix[6] = 0;
+                this.projMatrix[7] = 0;
+
+                this.projMatrix[8] = 0;
+                this.projMatrix[9] = 0;
+                if (Number.isFinite(this.far)) {
+                    const nf = 1.0 / (this.far - this.near);
+                    this.projMatrix[10] = this.near * nf;
+                    this.projMatrix[14] = this.near * this.far * nf;
+                } else {
+                    this.projMatrix[10] = 0.0;
+                    this.projMatrix[14] = this.near;
+                }
+                this.projMatrix[11] = -1.0;
+
+                this.projMatrix[12] = 0;
+                this.projMatrix[13] = 0;
+                this.projMatrix[15] = 0;
+            } else {
+                Mat4.perspectiveZO(this.fovY, this.aspect, this.near, this.far, this.projMatrix);
+            }
         } else {
-            Mat4.orthoZO(
-                this.orthoLeft,
-                this.orthoRight,
-                this.orthoBottom,
-                this.orthoTop,
-                this.near,
-                this.far,
-                this.projMatrix
-            );
+            if (this.reversedZ) {
+                Mat4.orthoZO(
+                    this.orthoLeft,
+                    this.orthoRight,
+                    this.orthoBottom,
+                    this.orthoTop,
+                    this.far,
+                    this.near,
+                    this.projMatrix
+                );
+            } else {
+                Mat4.orthoZO(
+                    this.orthoLeft,
+                    this.orthoRight,
+                    this.orthoBottom,
+                    this.orthoTop,
+                    this.near,
+                    this.far,
+                    this.projMatrix
+                );
+            }
         }
         Mat4.invert(this.projMatrix, this.invProjMatrix);
         this._updateViewProj();

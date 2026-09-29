@@ -33,7 +33,8 @@
   },
   "include": [
     "Atoolkit/**/*.ts",
-    "WeebGfx/**/*.ts"
+    "WeebGfx/**/*.ts",
+    "tests/ModelStudio/**/*.ts"
   ],
   "exclude": [
     "node_modules",

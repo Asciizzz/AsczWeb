@@ -11,7 +11,12 @@ import type {
     ShaderParams,
 } from "../../types.js";
 import { VERTEX_FORMAT_SIZES } from "../../types.js";
-import { ShaderWGPU, type ParamBindingsWGPU, type ShaderGroupMetaWGPU } from "../shader.js";
+import {
+    ShaderWGPU,
+    type ParamBindingsWGPU,
+    type ShaderGroupMetaWGPU,
+    type PipelineConfigWGPU,
+} from "../shader.js";
 import type { Node, Connection, WgslDataType } from "./types.js";
 import {
     InputVertexNode,
@@ -32,6 +37,10 @@ import {
     Vec4Node,
     TextureNode,
     SamplerNode,
+    DiscardNode,
+    CompareNode,
+    LogicNode,
+    SplitVec4Node,
 } from "./nodes/index.js";
 
 const STAGE_VERTEX = typeof GPUShaderStage !== "undefined" ? GPUShaderStage.VERTEX : 1;
@@ -61,6 +70,20 @@ export interface ShaderSourceWGPU {
     meta: ShaderGroupMetaWGPU;
 }
 
+export type ShaderGraphConfigWGPU = PipelineConfigWGPU;
+
+export interface CompileOptionsWGPU {
+    targetFormat?: GPUTextureFormat;
+    depthFormat?: GPUTextureFormat;
+    cullMode?: GPUCullMode;
+    frontFace?: GPUFrontFace;
+    topology?: GPUPrimitiveTopology;
+    blend?: GPUBlendState;
+    depthWriteEnabled?: boolean;
+    depthCompare?: GPUCompareFunction;
+    order?: number;
+}
+
 /**
  * Compiles a vertex-fragment node graph into WGSL source and initializes RasterPipeline.
  * Uses a four-frequency binding layout:
@@ -72,6 +95,59 @@ export interface ShaderSourceWGPU {
 export class ShaderGraphWGPU {
     nodes: Map<string, Node> = new Map();
     connections: Connection[] = [];
+
+    cullMode: GPUCullMode = "back";
+    frontFace: GPUFrontFace = "ccw";
+    topology: GPUPrimitiveTopology = "triangle-list";
+    blend?: GPUBlendState;
+    depthWriteEnabled: boolean = true;
+    depthCompare: GPUCompareFunction = "greater-equal";
+    order: number = 0;
+
+    constructor(config: ShaderGraphConfigWGPU = {}) {
+        if (config.cullMode !== undefined) this.cullMode = config.cullMode;
+        if (config.frontFace !== undefined) this.frontFace = config.frontFace;
+        if (config.topology !== undefined) this.topology = config.topology;
+        if (config.blend !== undefined) this.blend = config.blend;
+        if (config.depthWriteEnabled !== undefined) this.depthWriteEnabled = config.depthWriteEnabled;
+        if (config.depthCompare !== undefined) this.depthCompare = config.depthCompare;
+        if (config.order !== undefined) this.order = config.order;
+    }
+
+    setCullMode(cullMode: GPUCullMode): this {
+        this.cullMode = cullMode;
+        return this;
+    }
+
+    setFrontFace(frontFace: GPUFrontFace): this {
+        this.frontFace = frontFace;
+        return this;
+    }
+
+    setTopology(topology: GPUPrimitiveTopology): this {
+        this.topology = topology;
+        return this;
+    }
+
+    setBlend(blend?: GPUBlendState): this {
+        this.blend = blend;
+        return this;
+    }
+
+    setDepthWriteEnabled(enabled: boolean): this {
+        this.depthWriteEnabled = enabled;
+        return this;
+    }
+
+    setDepthCompare(compare: GPUCompareFunction): this {
+        this.depthCompare = compare;
+        return this;
+    }
+
+    setOrder(order: number): this {
+        this.order = order;
+        return this;
+    }
 
     addNode(node: Node): this {
         this.nodes.set(node.id, node);
@@ -209,10 +285,10 @@ export class ShaderGraphWGPU {
             }
         }
 
-        // Trace backward from OutputFragment
+        // Trace backward from OutputFragment and Discard
         const fragmentQueue: string[] = [];
         for (const n of this.nodes.values()) {
-            if (n.type === "OutputFragment") {
+            if (n.type === "OutputFragment" || n.type === "Discard") {
                 fragmentQueue.push(n.id);
                 nodeStages.set(n.id, "fragment");
             }
@@ -369,11 +445,11 @@ export class ShaderGraphWGPU {
         const hasMaterialUniform = paramFloats.length > 0 || paramVec4s.length > 0;
         if (hasMaterialUniform) {
             codeLines.push("struct MaterialParams {");
-            for (const f of paramFloats) {
-                codeLines.push(`    ${f}: f32,`);
-            }
             for (const v of paramVec4s) {
                 codeLines.push(`    ${v}: vec4<f32>,`);
+            }
+            for (const f of paramFloats) {
+                codeLines.push(`    ${f}: f32,`);
             }
             codeLines.push("};");
             codeLines.push(`@group(1) @binding(${group1Bindings++}) var<uniform> u_material: MaterialParams;`);
@@ -449,6 +525,16 @@ export class ShaderGraphWGPU {
             if (fromNode instanceof UniformMatrixNode) {
                 return "u_camera.viewProjMatrix";
             }
+            if (fromNode instanceof SplitVec4Node) {
+                const ch = (socketId === "r" || socketId === "x") ? "x"
+                    : (socketId === "g" || socketId === "y") ? "y"
+                    : (socketId === "b" || socketId === "z") ? "z"
+                    : "w";
+                return `${fromNode.id}_out.${ch}`;
+            }
+            if (fromNode instanceof CompareNode || fromNode instanceof LogicNode) {
+                return `${fromNode.id}_out`;
+            }
             return `${fromNode.id}_out`;
         };
 
@@ -457,7 +543,12 @@ export class ShaderGraphWGPU {
             if (!conn) {
                 const targetNode = this.nodes.get(toNodeId);
                 const socket = targetNode?.inputs.find((s) => s.id === toSocketId);
+                if (targetNode instanceof CompareNode && toSocketId === "b" && targetNode.defaultB !== undefined) {
+                    return targetNode.defaultB.toFixed(4);
+                }
                 switch (socket?.dataType) {
+                    case "bool":
+                        return "false";
                     case "f32":
                         return "0.0";
                     case "vec2<f32>":
@@ -534,7 +625,15 @@ export class ShaderGraphWGPU {
                 const b = getExpr(node.id, "b", "vertex");
                 const connB = this.connections.find((c) => c.toNodeId === node.id && c.toSocketId === "b");
                 const fromB = connB ? this.nodes.get(connB.fromNodeId) : undefined;
-                const isBVec3 = fromB && (fromB instanceof WorldTransformNode || fromB instanceof SkinTransformNode || (fromB instanceof InputVertexNode && fromB.dataType === "vec3<f32>"));
+                const bSocket = fromB?.outputs.find((s) => s.id === connB?.fromSocketId);
+                const isBVec3 = fromB && (
+                    bSocket?.dataType === "vec3<f32>" ||
+                    fromB instanceof WorldTransformNode ||
+                    fromB instanceof SkinTransformNode ||
+                    (fromB instanceof InputVertexNode && fromB.dataType === "vec3<f32>") ||
+                    (fromB instanceof AddNode && fromB.dataType === "vec3<f32>") ||
+                    (fromB instanceof MultiplyNode && fromB.dataType === "vec3<f32>")
+                );
                 if (isBVec3 && node.dataType === "vec4<f32>") {
                     codeLines.push(`    let ${node.id}_out = ${a} * vec4<f32>(${b}, 1.0);`);
                 } else {
@@ -553,6 +652,27 @@ export class ShaderGraphWGPU {
                 const tex = getExpr(node.id, "texture", "vertex");
                 const coords = getExpr(node.id, "coords", "vertex");
                 codeLines.push(`    let ${node.id}_out = textureLoad(${tex}, vec2<i32>(${coords}), 0);`);
+            } else if (node instanceof SplitVec4Node) {
+                const inVal = getExpr(node.id, "in", "vertex");
+                codeLines.push(`    let ${node.id}_out = ${inVal};`);
+            } else if (node instanceof CompareNode) {
+                const a = getExpr(node.id, "a", "vertex");
+                const b = getExpr(node.id, "b", "vertex");
+                let opSymbol = "<";
+                switch (node.op) {
+                    case "less": opSymbol = "<"; break;
+                    case "less_equal": opSymbol = "<="; break;
+                    case "greater": opSymbol = ">"; break;
+                    case "greater_equal": opSymbol = ">="; break;
+                    case "equal": opSymbol = "=="; break;
+                    case "not_equal": opSymbol = "!="; break;
+                }
+                codeLines.push(`    let ${node.id}_out = (${a} ${opSymbol} ${b});`);
+            } else if (node instanceof LogicNode) {
+                const a = getExpr(node.id, "a", "vertex");
+                const b = getExpr(node.id, "b", "vertex");
+                const opSym = node.op === "or" ? "||" : "&&";
+                codeLines.push(`    let ${node.id}_out = (${a} ${opSym} ${b});`);
             } else if (node instanceof OutputVertexNode) {
                 const conn = this.connections.find((c) => c.toNodeId === node.id && c.toSocketId === "clipPosition");
                 if (!conn) {
@@ -577,8 +697,36 @@ export class ShaderGraphWGPU {
         codeLines.push("fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {");
 
         const fragmentNodes = this._getTopologicalStageNodes("fragment", nodeStages);
+        let outputFragNode: OutputFragmentNode | undefined;
         for (const node of fragmentNodes) {
-            if (node instanceof SampleTextureNode) {
+            if (node instanceof OutputFragmentNode) {
+                outputFragNode = node;
+                continue;
+            } else if (node instanceof DiscardNode) {
+                const cond = getExpr(node.id, "condition", "fragment");
+                codeLines.push(`    if (${cond}) { discard; }`);
+            } else if (node instanceof SplitVec4Node) {
+                const inVal = getExpr(node.id, "in", "fragment");
+                codeLines.push(`    let ${node.id}_out = ${inVal};`);
+            } else if (node instanceof CompareNode) {
+                const a = getExpr(node.id, "a", "fragment");
+                const b = getExpr(node.id, "b", "fragment");
+                let opSymbol = "<";
+                switch (node.op) {
+                    case "less": opSymbol = "<"; break;
+                    case "less_equal": opSymbol = "<="; break;
+                    case "greater": opSymbol = ">"; break;
+                    case "greater_equal": opSymbol = ">="; break;
+                    case "equal": opSymbol = "=="; break;
+                    case "not_equal": opSymbol = "!="; break;
+                }
+                codeLines.push(`    let ${node.id}_out = (${a} ${opSymbol} ${b});`);
+            } else if (node instanceof LogicNode) {
+                const a = getExpr(node.id, "a", "fragment");
+                const b = getExpr(node.id, "b", "fragment");
+                const opSym = node.op === "or" ? "||" : "&&";
+                codeLines.push(`    let ${node.id}_out = (${a} ${opSym} ${b});`);
+            } else if (node instanceof SampleTextureNode) {
                 const tex = getExpr(node.id, "texture", "fragment");
                 const smp = getExpr(node.id, "sampler", "fragment");
                 const uv = getExpr(node.id, "uv", "fragment");
@@ -591,14 +739,18 @@ export class ShaderGraphWGPU {
                 const a = getExpr(node.id, "a", "fragment");
                 const b = getExpr(node.id, "b", "fragment");
                 codeLines.push(`    let ${node.id}_out = ${a} + ${b};`);
-            } else if (node instanceof OutputFragmentNode) {
-                const conn = this.connections.find((c) => c.toNodeId === node.id && c.toSocketId === "color");
-                if (!conn) {
-                    throw new Error(`OutputFragmentNode '${node.id}' has no incoming connection to 'color'!`);
-                }
-                const color = getExpr(node.id, "color", "fragment");
-                codeLines.push(`    return ${color};`);
             }
+        }
+
+        if (outputFragNode) {
+            const conn = this.connections.find((c) => c.toNodeId === outputFragNode!.id && c.toSocketId === "color");
+            if (!conn) {
+                throw new Error(`OutputFragmentNode '${outputFragNode.id}' has no incoming connection to 'color'!`);
+            }
+            const color = getExpr(outputFragNode.id, "color", "fragment");
+            codeLines.push(`    return ${color};`);
+        } else {
+            throw new Error("No OutputFragmentNode found in shader graph!");
         }
 
         codeLines.push("}");
@@ -672,7 +824,12 @@ export class ShaderGraphWGPU {
                 const newDeg = (inDegree.get(neighbor) ?? 1) - 1;
                 inDegree.set(neighbor, newDeg);
                 if (newDeg === 0) {
-                    queue.push(neighbor);
+                    const neighborNode = this.nodes.get(neighbor);
+                    if (neighborNode instanceof DiscardNode) {
+                        queue.unshift(neighbor);
+                    } else {
+                        queue.push(neighbor);
+                    }
                 }
             }
         }
@@ -691,15 +848,17 @@ export class ShaderGraphWGPU {
      */
     compile(
         device: GPUDevice,
-        options: {
-            targetFormat?: GPUTextureFormat;
-            depthFormat?: GPUTextureFormat;
-            cullMode?: GPUCullMode;
-            blend?: GPUBlendState;
-        } = {}
+        options: CompileOptionsWGPU = {}
     ): ShaderWGPU {
         const { wgslCode, vertexLayout, defaultParams, paramBindings, meta } = this.generateShaderSource();
         const targetFormat = options.targetFormat ?? "bgra8unorm";
+        const cullMode = options.cullMode ?? this.cullMode;
+        const frontFace = options.frontFace ?? this.frontFace;
+        const topology = options.topology ?? this.topology;
+        const blend = options.blend ?? this.blend;
+        const depthWriteEnabled = options.depthWriteEnabled ?? this.depthWriteEnabled;
+        const depthCompare = options.depthCompare ?? this.depthCompare;
+        const order = options.order ?? this.order;
 
         // Derive WebGPU VertexBufferLayout
         const gpuVertexBufferLayout: GPUVertexBufferLayout = {
@@ -774,17 +933,18 @@ export class ShaderGraphWGPU {
             fragment: {
                 code: wgslCode,
                 entryPoint: "fs_main",
-                targets: [{ format: targetFormat, blend: options.blend }],
+                targets: [{ format: targetFormat, blend }],
             },
             primitive: {
-                topology: "triangle-list",
-                cullMode: options.cullMode ?? "none",
+                topology,
+                cullMode,
+                frontFace,
             },
             depthStencil: options.depthFormat
                 ? {
                       format: options.depthFormat,
-                      depthWriteEnabled: true,
-                      depthCompare: "less-equal",
+                      depthWriteEnabled,
+                      depthCompare,
                   }
                 : undefined,
             onShaderMessage: (msg) => {
@@ -803,7 +963,17 @@ export class ShaderGraphWGPU {
             defaultParams,
             paramBindings,
             meta,
-            bindLayouts
+            bindLayouts,
+            order,
+            {
+                cullMode,
+                frontFace,
+                topology,
+                blend,
+                depthWriteEnabled,
+                depthCompare,
+                order,
+            }
         );
     }
 

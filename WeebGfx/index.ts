@@ -17,7 +17,7 @@ export { Camera, type CameraProjectionMode } from "./camera.js";
 // Actor (Core atomic drawing unit)
 export {
     Actor,
-    type ActorOptions,
+    type ActorPass,
     type SkinData,
     type MorphData,
 } from "./actor.js";
@@ -45,6 +45,8 @@ export {
     parseGLTFJson,
     loadGLTF,
     unpackGLB,
+    decodeImageToTexture,
+    parseGLTFSampler,
     type GLTFParseOptions,
     type GLTFLoadOptions,
     type GLTFBufferMap,
@@ -62,7 +64,6 @@ export {
     type RenderTarget,
     type RenderOptions,
     type DrawMeshOptions,
-    type MeshRendererOptions,
 } from "./wgpu/index.js";
 export * from "./wgpu/shadergraph/index.js";
 

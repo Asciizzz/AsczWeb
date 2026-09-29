@@ -48,23 +48,29 @@ export class TextureWGPU extends TextureGPU {
         });
 
         const bytesPerPixel = cpu.format.includes("32") ? 16 : 4;
-        const bytesPerRow = Math.ceil((cpu.width * bytesPerPixel) / 256) * 256;
+        const bytesPerRow = cpu.width * bytesPerPixel;
+        const pixelsView = cpu.pixels instanceof Uint8Array
+            ? cpu.pixels
+            : new Uint8Array(cpu.pixels.buffer, cpu.pixels.byteOffset, cpu.pixels.byteLength);
+
         device.queue.writeTexture(
             { texture },
-            cpu.pixels.buffer,
+            pixelsView as any,
             {
-                offset: cpu.pixels.byteOffset,
-                bytesPerRow,
-                rowsPerImage: cpu.height,
+                offset: 0,
+                bytesPerRow: cpu.height > 1 ? bytesPerRow : undefined,
+                rowsPerImage: cpu.height > 1 ? cpu.height : undefined,
             },
             [cpu.width, cpu.height, 1]
         );
 
         const view = texture.createView();
         const sampler = device.createSampler(
-            samplerDescriptor ?? {
+            samplerDescriptor ?? cpu.sampler ?? {
                 magFilter: "linear",
                 minFilter: "linear",
+                addressModeU: "repeat",
+                addressModeV: "repeat",
             }
         );
 

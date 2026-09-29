@@ -6,10 +6,12 @@ import type { ShaderParams } from "./types.js";
 export class ShaderGPU {
     defaultParams: ShaderParams;
     code?: string;
+    order: number;
 
-    constructor(defaultParams: ShaderParams = {}, code?: string) {
+    constructor(defaultParams: ShaderParams = {}, code?: string, order: number = 0) {
         this.defaultParams = defaultParams;
         this.code = code;
+        this.order = order;
     }
 
     destroy(): void {

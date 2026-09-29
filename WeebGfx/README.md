@@ -1,51 +1,142 @@
 # WeebGfx
 
-Backend-agnostic graphics abstractions and WebGPU hardware rendering pipeline.
+Backend-agnostic graphics architecture and hardware rendering engine.
 
 ---
 
 ## Overview
 
-WeebGfx provides two operational layers:
-1. **Agnostic Primitives**: CPU and base GPU structures for geometry (`MeshCPU`, `MeshGPU`), textures (`TextureCPU`, `TextureGPU`), pipelines (`ShaderGPU`), cameras (`Camera`), and draw items (`Actor`).
-2. **WebGPU Hardware Backend**: WebGPU implementations (`MeshWGPU`, `TextureWGPU`, `ShaderWGPU`, `MeshRendererWGPU`) and node-based WGSL shader compilation (`ShaderGraphWGPU`).
+WeebGfx separates graphics primitives into two foundational layers:
+
+1. **Hardware-Agnostic Core**: Pure CPU representations and abstract GPU resource interfaces for geometry, textures, shaders, skeletons, and draw units.
+2. **Subsystems**: Dedicated modules for backend implementations, asset loading, and future rendering architectures.
+
+Detailed subsystem documentation is maintained in dedicated directories:
+- **WebGPU Backend**: [wgpu/README.md](./wgpu/README.md)
+- **Model Loader**: [loader/README.md](./loader/README.md)
+- **Shader Graph**: [wgpu/shadergraph/README.md](./wgpu/shadergraph/README.md)
 
 ---
 
 ## Core Primitives
 
+### Resource Base Inheritance
+
+WeebGfx structures graphics resources as paired CPU data definitions and hardware GPU implementations.
+
+```
+MeshCPU    ---> MeshGPU    (e.g. MeshWGPU)
+TextureCPU ---> TextureGPU (e.g. TextureWGPU)
+                ShaderGPU  (e.g. ShaderWGPU)
+```
+
+#### Geometry: `MeshCPU` & `MeshGPU`
+
+- `MeshCPU`: Pure memory container storing raw vertex binary buffers (`vertexBytes`), optional index buffers (`indexBytes`), vertex layout descriptors, and submesh slice ranges.
+- `MeshGPU`: Base class for hardware geometry wrappers storing GPU buffer handles and submesh slice descriptors.
+
+```typescript
+import { MeshCPU, type Submesh, type VertexLayout } from "@asciiz/weebgfx";
+
+const layout: VertexLayout = {
+    arrayStride: 24,
+    attributes: [
+        { name: "position", format: "float32x3", offset: 0, shaderLocation: 0 },
+        { name: "normal", format: "float32x3", offset: 12, shaderLocation: 1 },
+    ],
+};
+
+const submeshes: Submesh[] = [
+    { firstIndex: 0, indexCount: 36, materialIndex: 0 },
+];
+
+const cpuMesh = new MeshCPU(layout, submeshes, vertexBytes, indexBytes);
+```
+
+#### Textures: `TextureCPU` & `TextureGPU`
+
+- `TextureCPU`: Uncompressed CPU pixel buffer (`width`, `height`, `format`, `data: Uint8Array`).
+- `TextureGPU`: Base class for hardware texture representations.
+
+```typescript
+import { TextureCPU } from "@asciiz/weebgfx";
+
+const cpuTexture = new TextureCPU(
+    512,
+    512,
+    "rgba8unorm",
+    pixelBytes
+);
+```
+
+#### Shaders: `ShaderGPU`
+
+Abstract base class for compiled hardware pipelines. Exposes reflection metadata (`ShaderMeta`), default parameters, and disposal hooks.
+
+---
+
 ### Actor
 
-`Actor` is the atomic draw item in WeebGfx. It holds hardware resources, unified instance transforms, and skeletal skinning data. Instancing is the default state: a single object is treated as 1 instance.
+`Actor` is the atomic draw item in WeebGfx. It pairs a hardware mesh with shader pass buckets, instance matrices, and skeletal skinning data.
+
+Instancing is the default model: a single object is represented as 1 instance.
 
 ```typescript
 import { Actor } from "@asciiz/weebgfx";
 
 // Single object (1 instance):
-const actor = new Actor({
-    mesh: meshWgpu,
-    shaders: shaderWgpu,
-    transform: worldMatrix,
-});
+const actor = new Actor(gpuMesh, gpuShader, worldMatrix);
 
 // Multi-instance batch (N instances):
-const batchActor = new Actor({
-    mesh: meshWgpu,
-    shaders: shaderWgpu,
-    instances: flatMatricesFloat32Array,
-    instanceCount: 100,
-});
+const batchActor = new Actor(gpuMesh, gpuShader)
+    .setInstances(flatMatricesFloat32Array, 100);
+
+// Multi-pass shader (e.g. base material + outline pass):
+actor.addPass(outlineShader, undefined, outlineParams);
 ```
 
-- `mesh`: GPU mesh instance providing vertex and optional index buffers.
-- `shaders`: Single shader applied across all submeshes, or array mapping to specific submesh indices.
-- `params`: Material parameter collections (floats, vectors, textures, samplers).
-- `instances`: Unified `InstanceData` containing `matrices` (`Float32Array`), optional `normalMatrices`, and active `count`.
-- `transform`: Getter/setter for the world transformation matrix of instance 0.
-- `normalMatrix`: Getter/setter for the normal transformation matrix of instance 0.
-- `instanceCount`: Number of instances to dispatch. Defaults to 1 for single objects.
-- `skin`: Optional skeletal joint matrices (`Float32Array`) and joint count.
-- **Instanced Skinning Rule**: When an actor specifies both multiple instances and skinning data, all instances share the identical skeletal pose in synchronized space.
+#### Properties
+
+- `mesh`: Target `MeshGPU` instance.
+- `passes`: Array of `ActorPass` buckets. Each pass holds a `shader`, `submeshIndices`, and `params`.
+- `instances`: Unified `InstanceData` holding contiguous `Float32Array` matrices and active count.
+- `transform`: World transformation matrix of the primary instance (index 0).
+- `normalMatrix`: Normal transformation matrix of the primary instance (index 0).
+- `skin`: Optional skeletal skinning joint matrices (`Float32Array`) and joint count.
+
+#### Methods
+
+- `addPass(shader, submeshIndices?, params?)`: Adds or appends a pass bucket for specified submeshes with optional parameters. Targets all submeshes if omitted.
+- `setPass(shader, submeshIndices?, params?)`: Replaces all passes with the specified shader pass.
+- `getPass(shader)`: Retrieves the pass matching the given shader.
+- `removePass(shader)`: Removes the pass matching the given shader.
+- `clearPasses()`: Removes all passes from the actor.
+- `setPassParams(shader, params, submeshIndex?)`: Sets parameter overrides on a pass.
+- `setSubmeshVisible(submeshIndex, visible)`: Toggles visibility for a submesh index across passes.
+- `isSubmeshVisible(submeshIndex)`: Checks if a submesh index is present in any pass.
+- `setTransform(world, normal?)`: Sets primary instance transform matrix and optional normal matrix.
+- `setInstances(matrices, count?, normalMatrices?)`: Sets contiguous buffer of instance world matrices and active count.
+- `setSkin(joints, jointCount?)`: Sets joint matrices for skeletal animation.
+
+---
+
+### SkeletonCPU
+
+`SkeletonCPU` maintains parent-child joint hierarchies, local transform matrices, and inverse bind matrices. It evaluates forward kinematics using Alm (`@asciiz/atoolkit/alm`), outputting flat joint matrix streams for skeletal skinning.
+
+```typescript
+import { SkeletonCPU } from "@asciiz/weebgfx";
+
+const skeleton = new SkeletonCPU();
+const root = skeleton.addJoint("root", -1, rootLocalMat, rootInvBind);
+const spine = skeleton.addJoint("spine", root, spineLocalMat, spineInvBind);
+
+// Evaluate forward kinematics: JointMatrix = WorldMatrix * InverseBindMatrix
+const jointMatrices = skeleton.computeJointMatrices();
+actor.setSkin(jointMatrices, skeleton.jointCount);
+```
+
+---
 
 ### Camera
 
@@ -60,218 +151,40 @@ camera.lookAt([0, 5, 10], [0, 0, 0], [0, 1, 0]);
 const uniformData = camera.getUniformData(); // 52 floats (208 bytes)
 ```
 
-The uniform buffer layout comprises 52 floats (208 bytes):
-- `0..15`: View matrix (`mat4x4<f32>`, 64 bytes).
-- `16..31`: Projection matrix (`mat4x4<f32>`, 64 bytes).
-- `32..47`: Combined view-projection matrix (`mat4x4<f32>`, 64 bytes).
-- `48..50`: Camera world position (`vec3<f32>`, 12 bytes).
-- `51`: Padding float (4 bytes).
-
-### Geometry
-
-Geometry processing is split between CPU definitions and hardware GPU buffers.
-
-```typescript
-import { MeshCPU, MeshWGPU } from "@asciiz/weebgfx";
-
-const cpuMesh = new MeshCPU(
-    {
-        arrayStride: 24,
-        attributes: [
-            { name: "position", format: "float32x3", offset: 0, shaderLocation: 0 },
-            { name: "normal", format: "float32x3", offset: 12, shaderLocation: 1 },
-        ],
-    },
-    [{ firstIndex: 0, indexCount: 36 }],
-    vertexBytes,
-    indexBytes
-);
-
-const gpuMesh = MeshWGPU.create(device, cpuMesh);
-```
-
-- `MeshCPU`: Holds raw binary buffers (`vertexBytes`, `indexBytes`), vertex layout descriptors, and submesh ranges.
-- `MeshWGPU`: Allocates native GPU vertex and index buffers on a `GPUDevice`.
+Uniform data layout (52 floats / 208 bytes):
+- `0..15`: View matrix (`mat4x4<f32>`).
+- `16..31`: Projection matrix (`mat4x4<f32>`).
+- `32..47`: Combined view-projection matrix (`mat4x4<f32>`).
+- `48..50`: Camera world position (`vec3<f32>`).
+- `51`: Alignment padding.
 
 ---
+        
+## Subsystems
 
-## WebGPU Renderer
+### WebGPU Backend (`wgpu/`)
 
-`MeshRendererWGPU` executes draw calls inside a caller-provided render pass. It supports both immediate execution and deferred submission with state sorting.
+Native WebGPU rendering implementation built on `@asciiz/atoolkit/awgpu`.
 
-### Frequency-Slotted Binding Model
+- **Hardware Resources**: `MeshWGPU`, `TextureWGPU`, `ShaderWGPU`.
+- **Render Dispatcher**: `MeshRendererWGPU` executing a four-frequency bind group model (Frame, Batch, Instance, Joint), dynamic offset instancing, and state sorting by pipeline and mesh.
+- **Shader Compiler**: `ShaderGraphWGPU` compiling node graphs into WGSL and GPU pipelines.
 
-Pipelines adhere to a four-frequency WebGPU bind group layout:
-- **Group 0 (PerFrame)**: Camera projection and view uniforms. Bound once per frame or when an actor overrides the camera.
-- **Group 1 (PerBatch)**: Material uniforms, textures, and samplers. Cached through internal `BindTableCache`.
-- **Group 2 (PerInstance)**: Read-only storage buffer of instance transforms indexed via `@builtin(instance_index)` with 256-byte dynamic offsets.
-- **Group 3 (PerInstance)**: Skeletal joint uniform buffer array (`array<mat4x4<f32>, 64>`).
+See [wgpu/README.md](./wgpu/README.md) and [wgpu/shadergraph/README.md](./wgpu/shadergraph/README.md).
 
-### Deferred Rendering and Drawing
+### Model Loader (`loader/`)
 
-```typescript
-import { MeshRendererWGPU } from "@asciiz/weebgfx";
+Decoupled 3D model loading system supporting GLTF 2.0 and binary GLB containers.
 
-const renderer = new MeshRendererWGPU(device);
+- Parses asset geometry into unified `MeshCPU` instances with submesh slices.
+- Bakes static node hierarchies into vertex positions.
+- Decodes image formats into `TextureCPU` buffers.
+- Bridges data to `ModelWGPU` for hardware allocation and `Actor` stamping.
+- Enforces strict explicit shader assignment with zero default shader generation.
 
-// Mode 1: Deferred submission (recommended for state sorting)
-renderer.submit(actorA);
-renderer.submit(actorB);
-renderer.flush({ pass, camera });
+See [loader/README.md](./loader/README.md).
 
-// Mode 2: Immediate direct execution
-renderer.draw({ pass, camera }, actor);
+### Future Roadmap
 
-// Mode 3: Direct batch execution
-renderer.render({ pass, camera }, [actor1, actor2, actor3]);
-```
-
-- `submit(actor)`: Queues actor into internal draw list without immediate GPU dispatch.
-- `flush(target)`: Sorts queued draws by pipeline and mesh to minimize GPU state transitions, executes draw commands, and resets queue.
-- `target.pass`: Active `GPURenderPassEncoder`.
-- `target.camera`: Camera used for draw calls in the render pass.
-- `target.device`: Optional `GPUDevice` if not provided during renderer construction.
-
----
-
-## Shader Graph
-
-`ShaderGraphWGPU` compiles a directed graph of vertex and fragment nodes into WGSL shader code and initializes a WebGPU `RasterPipeline`.
-
-```typescript
-import {
-    ShaderGraphWGPU,
-    InputVertexNode,
-    WorldTransformNode,
-    CameraNode,
-    MultiplyNode,
-    OutputVertexNode,
-    OutputFragmentNode,
-} from "@asciiz/weebgfx";
-
-const graph = new ShaderGraphWGPU();
-
-const inPos = new InputVertexNode("in_pos", "position", "float32x3");
-const inCol = new InputVertexNode("in_col", "color", "float32x4");
-graph.chainVertexInputs(inPos, inCol);
-
-const txNode = new WorldTransformNode("tx");
-const camNode = new CameraNode("cam");
-const mvpNode = new MultiplyNode("mvp", "vec4<f32>");
-const outV = new OutputVertexNode("out_v");
-const outF = new OutputFragmentNode("out_f");
-
-graph.addNode(txNode);
-graph.addNode(camNode);
-graph.addNode(mvpNode);
-graph.addNode(outV);
-graph.addNode(outF);
-
-// Wire vertex stage
-graph.connect("in_pos", "data", "tx", "in_position");
-graph.connect("cam", "viewProj", "mvp", "a");
-graph.connect("tx", "out_position", "mvp", "b");
-graph.connect("mvp", "res", "out_v", "clipPosition");
-
-// Wire fragment stage
-graph.connect("in_col", "data", "out_f", "color");
-
-const shader = graph.compile(device, {
-    targetFormat: "bgra8unorm",
-    depthFormat: "depth24plus",
-    cullMode: "back",
-});
-```
-
-- `WorldTransformNode`: Automatically handles world matrix multiplication. Shaders compile identically for 1 instance or 10,000 instances via `@builtin(instance_index)`.
-- `SkinTransformNode`: Deforms local vertex positions and normals according to weighted joint indices against the Group 3 joint array.
-- `chainVertexInputs()`: Links sequential vertex inputs into a unified `VertexLayout` descriptor.
-- `compile()`: Topologically sorts graph nodes, analyzes cross-stage data routing (auto-varyings), extracts uniform parameter bindings, compiles WGSL source, and allocates the underlying `RasterPipeline`.
-
----
-
-## Model Loading Subsystem
-
-Decoupled model loading separates CPU asset parsing from WebGPU hardware allocation. Geometry hierarchies are flattened into unified meshes with submesh slices, static transforms are baked into vertex positions, and skeletal hierarchies are extracted into `SkeletonCPU`.
-
-### Decoupled Asset Pipeline
-
-```typescript
-import { loadGLTF, parseGLB, ModelWGPU } from "@asciiz/weebgfx";
-
-// 1. Pure CPU asset parsing (browser, worker, or server runtime)
-const modelCpu = await loadGLTF("assets/character.glb");
-
-// 2. Hardware WebGPU bridge: uploads buffers, textures, and compiles pipelines
-const modelGpu = ModelWGPU.create(device, modelCpu);
-
-// 3. Actor factory: stamps independent render units with separate transform streams
-const heroActor = modelGpu.createActor();
-const enemyActor = modelGpu.createActor({
-    transform: enemyWorldMatrix,
-});
-```
-
-### SkeletonCPU
-
-`SkeletonCPU` maintains joint hierarchies, rest poses, and evaluates forward kinematics into contiguous skin matrix streams for Group 3 skin uniforms.
-
-```typescript
-import { SkeletonCPU } from "@asciiz/weebgfx";
-
-const skeleton = new SkeletonCPU();
-const root = skeleton.addJoint("root", -1, rootLocalMatrix, rootInvBind);
-const spine = skeleton.addJoint("spine", root, spineLocalMatrix, spineInvBind);
-
-// Evaluates parent-child forward kinematics (JointMatrix = WorldMatrix * InverseBindMatrix)
-const jointMatrices = skeleton.computeJointMatrices();
-actor.setSkin(jointMatrices, skeleton.jointCount);
-```
-
-- `addJoint(name, parentIndex, localMatrix?, inverseBindMatrix?)`: Appends joint node to hierarchy.
-- `computeJointMatrices(localTransforms?, out?)`: Evaluates parent-child forward kinematics and flattens result into contiguous `Float32Array(count * 16)`.
-
----
-
-## Quick Start Example
-
-
-```typescript
-import {
-    MeshCPU,
-    MeshWGPU,
-    Camera,
-    Actor,
-    MeshRendererWGPU,
-    ShaderGraphWGPU,
-} from "@asciiz/weebgfx";
-
-// 1. Setup camera and renderer
-const camera = new Camera(Math.PI / 4, canvas.width / canvas.height, 0.1, 100);
-camera.lookAt([0, 2, 5], [0, 0, 0]);
-
-const renderer = new MeshRendererWGPU(device);
-
-// 2. Prepare mesh and shader
-const mesh = MeshWGPU.create(device, cpuMeshData);
-const shader = graph.compile(device, { targetFormat: canvasFormat });
-
-// 3. Create actor
-const actor = new Actor({
-    mesh,
-    shaders: shader,
-    transform: worldMatrix,
-});
-
-// 4. Render frame with deferred submission
-function frame() {
-    const encoder = device.createCommandEncoder();
-    const pass = encoder.beginRenderPass(renderPassDesc);
-
-    renderer.submit(actor);
-    renderer.flush({ pass, camera });
-
-    pass.end();
-    device.queue.submit([encoder.finish()]);
-}
-```
+- **WebGL2 Backend (`wgl2/`)**: Hardware fallback implementation for environments without WebGPU support.
+- **Entity Component System (`ecs/`)**: High-performance data-oriented ECS module for scene and actor management.

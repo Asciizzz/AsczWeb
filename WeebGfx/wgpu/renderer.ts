@@ -9,7 +9,8 @@ import {
     type BindingEntry,
 } from "@asciiz/atoolkit/awgpu";
 import type { Actor, SkinData } from "../actor.js";
-import type { ShaderParams } from "../types.js";
+import type { ShaderGPU } from "../shader.js";
+import type { ShaderParams, Submesh } from "../types.js";
 import type { Camera } from "../camera.js";
 import { MeshWGPU } from "./mesh.js";
 import { ShaderWGPU } from "./shader.js";
@@ -47,11 +48,6 @@ export interface DrawMeshOptions extends RenderTarget {
     submeshIndex?: number;
 }
 
-export interface MeshRendererOptions {
-    device?: GPUDevice;
-    uniformPool?: BufferPool;
-}
-
 const BUFFER_USAGE_UNIFORM_COPY_DST =
     typeof GPUBufferUsage !== "undefined"
         ? GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
@@ -81,6 +77,20 @@ function getStateId(obj: object | null | undefined): number {
     return id;
 }
 
+interface RenderItemWGPU {
+    actor: Actor;
+    mesh: MeshWGPU;
+    submesh: Submesh;
+    dynamicOffset: number;
+    instanceCount: number;
+    params?: ShaderParams | null;
+}
+
+interface ShaderBucketWGPU {
+    shader: ShaderWGPU;
+    items: RenderItemWGPU[];
+}
+
 /**
  * Submesh draw dispatcher operating within caller-provided render passes.
  * Uses a four-frequency WebGPU bind group layout:
@@ -103,6 +113,11 @@ export class MeshRendererWGPU {
     private _instanceBuffer?: Buffer;
     private _instanceStaging = new Float32Array(1024 * 64);
 
+    // Reusable pass bucket pools and offset cache
+    private _bucketMap = new Map<ShaderWGPU, ShaderBucketWGPU>();
+    private _bucketList: ShaderBucketWGPU[] = [];
+    private _actorOffsetMap = new Map<Actor, number>();
+
     // Deferred submission queue
     private _queue: Actor[] = [];
 
@@ -110,30 +125,15 @@ export class MeshRendererWGPU {
     private _fallbackTexture?: TextureWGPU;
     private _fallbackSampler?: GPUSampler;
 
-    constructor(deviceOrOptions?: GPUDevice | BufferPool | MeshRendererOptions) {
+    constructor(device?: GPUDevice, uniformPool?: BufferPool) {
         this.bindTableCache = new BindTableCache();
-
-        if (!deviceOrOptions) {
-            this.uniformPool = new BufferPool(
+        this.device = device;
+        this.uniformPool =
+            uniformPool ??
+            new BufferPool(
                 BUFFER_USAGE_UNIFORM_COPY_DST,
                 "WeebGfx_MeshRenderer_UniformPool"
             );
-        } else if ("queue" in deviceOrOptions) {
-            this.device = deviceOrOptions as GPUDevice;
-            this.uniformPool = new BufferPool(
-                BUFFER_USAGE_UNIFORM_COPY_DST,
-                "WeebGfx_MeshRenderer_UniformPool"
-            );
-        } else if ("acquire" in deviceOrOptions) {
-            this.uniformPool = deviceOrOptions as BufferPool;
-        } else {
-            const opts = deviceOrOptions as MeshRendererOptions;
-            this.device = opts.device;
-            this.uniformPool = opts.uniformPool ?? new BufferPool(
-                BUFFER_USAGE_UNIFORM_COPY_DST,
-                "WeebGfx_MeshRenderer_UniformPool"
-            );
-        }
     }
 
     /**
@@ -171,9 +171,15 @@ export class MeshRendererWGPU {
     /**
      * Executes draw calls for all submitted Actors in queue, then clears queue.
      */
-    flush(target: RenderTarget): void {
+    flush(target: RenderTarget): void;
+    flush(pass: GPURenderPassEncoder, camera: Camera): void;
+    flush(passOrTarget: GPURenderPassEncoder | RenderTarget, camera?: Camera): void {
         if (this._queue.length > 0) {
-            this.render(target, this._queue);
+            if ("pass" in passOrTarget) {
+                this.render(passOrTarget, this._queue);
+            } else {
+                this.render(passOrTarget, camera!, this._queue);
+            }
             this.clearQueue();
         }
     }
@@ -181,42 +187,61 @@ export class MeshRendererWGPU {
     /**
      * Draws single Actor inside render pass.
      */
-    draw(target: RenderTarget, actor: Actor): void {
-        this.render(target, [actor]);
+    draw(target: RenderTarget, actor: Actor): void;
+    draw(pass: GPURenderPassEncoder, camera: Camera, actor: Actor): void;
+    draw(passOrTarget: GPURenderPassEncoder | RenderTarget, cameraOrActor: Camera | Actor, actor?: Actor): void {
+        if ("pass" in passOrTarget) {
+            this.render(passOrTarget, [cameraOrActor as Actor]);
+        } else {
+            this.render(passOrTarget, cameraOrActor as Camera, [actor!]);
+        }
     }
 
     /**
      * Executes draw calls across iterable of Actors inside render pass.
      * Groups draws by shader pipeline and mesh to minimize GPU state switches.
      */
+    render(target: RenderTarget | RenderOptions, actors?: Iterable<Actor>): void;
+    render(pass: GPURenderPassEncoder, camera: Camera, actors?: Iterable<Actor>): void;
     render(
-        targetOrOptions: RenderOptions | RenderTarget,
+        passOrTarget: GPURenderPassEncoder | RenderOptions | RenderTarget,
+        cameraOrActors?: Camera | Iterable<Actor>,
         actorsArg?: Iterable<Actor>
     ): void {
-        const target = targetOrOptions as RenderTarget;
-        const options = targetOrOptions as RenderOptions;
+        let pass: GPURenderPassEncoder;
+        let cam: Camera;
+        let actors: Iterable<Actor> | undefined;
 
-        const pass = target.pass;
-        const camera = target.camera;
-        const device = target.device ?? this.device;
+        if ("pass" in passOrTarget) {
+            const target = passOrTarget as RenderTarget;
+            const options = passOrTarget as RenderOptions;
+            pass = target.pass;
+            cam = target.camera;
+            actors = (cameraOrActors as Iterable<Actor> | undefined) ?? options.actors ?? this._queue;
+        } else {
+            pass = passOrTarget as GPURenderPassEncoder;
+            cam = cameraOrActors as Camera;
+            actors = actorsArg ?? this._queue;
+        }
+
+        const device = ("device" in passOrTarget && passOrTarget.device) ? passOrTarget.device : this.device;
 
         if (!pass) {
             throw new Error(
-                "[MeshRendererWGPU] Render pass was not provided. Pass valid GPURenderPassEncoder in options: { pass, ... }."
+                "[MeshRendererWGPU] Render pass was not provided."
             );
         }
-        if (!camera) {
+        if (!cam) {
             throw new Error(
-                "[MeshRendererWGPU] Camera was not provided. Pass valid Camera instance in options: { camera, ... }."
+                "[MeshRendererWGPU] Camera was not provided."
             );
         }
         if (!device) {
             throw new Error(
-                "[MeshRendererWGPU] GPUDevice was not provided. Pass device to new RendererWGPU(device) or in render options: { device, ... }."
+                "[MeshRendererWGPU] GPUDevice was not provided. Pass device to new MeshRendererWGPU(device)."
             );
         }
 
-        const actors = actorsArg ?? options.actors ?? this._queue;
         if (!actors) return;
 
         // 1. Collect active actors and filter valid hardware meshes
@@ -225,33 +250,19 @@ export class MeshRendererWGPU {
 
         for (const actor of actors) {
             if (!(actor.mesh instanceof MeshWGPU)) continue;
-            if (actor.shaders.length === 0) continue;
-
             activeActors.push(actor);
             count++;
         }
 
         if (count === 0) return;
 
-        // 2. State sorting to minimize pipeline and mesh switches
-        activeActors.sort((a, b) => {
-            const sA = a.shaders[0];
-            const sB = b.shaders[0];
-            const pipeA = getStateId(sA instanceof ShaderWGPU ? sA.pipeline.native : sA);
-            const pipeB = getStateId(sB instanceof ShaderWGPU ? sB.pipeline.native : sB);
-            if (pipeA !== pipeB) return pipeA - pipeB;
-
-            const meshA = getStateId(a.mesh);
-            const meshB = getStateId(b.mesh);
-            return meshA - meshB;
-        });
-
-        // 3. Compute 256-byte aligned dynamic offsets for each actor
-        const actorOffsets = new Uint32Array(count);
+        // 2. Compute 256-byte aligned dynamic offsets for each actor
+        this._actorOffsetMap.clear();
         let totalBytes = 0;
         for (let i = 0; i < count; i++) {
-            actorOffsets[i] = totalBytes;
-            const instCount = Math.max(1, activeActors[i].instances.count);
+            const actor = activeActors[i];
+            this._actorOffsetMap.set(actor, totalBytes);
+            const instCount = Math.max(1, actor.instances.count);
             const bytesNeeded = instCount * 128; // 32 floats = 128 bytes per instance
             totalBytes += Math.ceil(bytesNeeded / 256) * 256;
         }
@@ -271,11 +282,12 @@ export class MeshRendererWGPU {
             });
         }
 
-        // 4. Pack instance matrices into CPU staging buffer
+        // 3. Pack instance matrices into CPU staging buffer
         for (let i = 0; i < count; i++) {
             const actor = activeActors[i];
             const instCount = Math.max(1, actor.instances.count);
-            const baseFloatOffset = actorOffsets[i] / 4;
+            const baseOffset = this._actorOffsetMap.get(actor) ?? 0;
+            const baseFloatOffset = baseOffset / 4;
             const matrices = actor.instances.matrices;
             const normalMatrices = actor.instances.normalMatrices;
 
@@ -302,72 +314,126 @@ export class MeshRendererWGPU {
         // Upload packed instances in single transfer
         this._instanceBuffer.write(device, this._instanceStaging.subarray(0, totalFloats), 0);
 
-        // 5. Update pass camera buffer once
-        this._updateCameraBuffer(device, camera);
+        // 4. Update pass camera buffer once
+        this._updateCameraBuffer(device, cam);
 
-        // 6. Render loop with state filtering
+        // 5. Populate shader pass buckets
+        for (let b = 0; b < this._bucketList.length; b++) {
+            this._bucketList[b].items.length = 0;
+        }
+        this._bucketList.length = 0;
+        this._bucketMap.clear();
+
+        for (let i = 0; i < count; i++) {
+            const actor = activeActors[i];
+            const mesh = actor.mesh as MeshWGPU;
+            const dynamicOffset = this._actorOffsetMap.get(actor) ?? 0;
+            const instanceCount = Math.max(1, actor.instances.count);
+
+            for (let p = 0; p < actor.passes.length; p++) {
+                const pass = actor.passes[p];
+                const shader = pass.shader;
+                if (!shader || !(shader instanceof ShaderWGPU)) continue;
+
+                let bucket = this._bucketMap.get(shader);
+                if (!bucket) {
+                    bucket = { shader, items: [] };
+                    this._bucketMap.set(shader, bucket);
+                    this._bucketList.push(bucket);
+                }
+
+                const submeshIndices = pass.submeshIndices;
+                const paramsList = pass.params;
+
+                for (let idx = 0; idx < submeshIndices.length; idx++) {
+                    const s = submeshIndices[idx];
+                    const submesh = mesh.submeshes[s];
+                    if (!submesh) continue;
+
+                    const param = paramsList ? paramsList[idx] : null;
+
+                    bucket.items.push({
+                        actor,
+                        mesh,
+                        submesh,
+                        dynamicOffset,
+                        instanceCount,
+                        params: param,
+                    });
+                }
+            }
+        }
+
+        // 6. Sort buckets by global shader order
+        this._bucketList.sort((a, b) => {
+            const orderDiff = a.shader.order - b.shader.order;
+            if (orderDiff !== 0) return orderDiff;
+            return getStateId(a.shader.pipeline.native) - getStateId(b.shader.pipeline.native);
+        });
+
+        // 7. Render loop with state filtering across sorted buckets
         let lastBoundPipeline: GPURenderPipeline | undefined;
         let lastBoundMesh: MeshWGPU | undefined;
         let lastBoundMaterial: BindTable | undefined;
         let lastBoundCameraTable: BindTable | undefined;
 
-        for (let i = 0; i < count; i++) {
-            const actor = activeActors[i];
-            const mesh = actor.mesh as MeshWGPU;
-            const submeshes = mesh.submeshes;
-            const dynamicOffset = actorOffsets[i];
-            const instanceCount = Math.max(1, actor.instances.count);
+        for (let b = 0; b < this._bucketList.length; b++) {
+            const bucket = this._bucketList[b];
+            const shader = bucket.shader;
+            const items = bucket.items;
+            if (items.length === 0) continue;
 
-            // Bind vertex and index buffers once per mesh
-            if (lastBoundMesh !== mesh) {
-                pass.setVertexBuffer(0, mesh.vertexBuffer.native);
-                if (mesh.indexBuffer) {
-                    const indexFormat = mesh.cpu.indexBytes instanceof Uint32Array ? "uint32" : "uint16";
-                    pass.setIndexBuffer(mesh.indexBuffer.native, indexFormat);
-                }
-                lastBoundMesh = mesh;
+            // Sort intra-bucket items by mesh to minimize vertex and index buffer switches
+            items.sort((itemA, itemB) => getStateId(itemA.mesh) - getStateId(itemB.mesh));
+
+            // Set pipeline
+            if (lastBoundPipeline !== shader.pipeline.native) {
+                pass.setPipeline(shader.pipeline.native);
+                lastBoundPipeline = shader.pipeline.native;
+                lastBoundCameraTable = undefined;
             }
 
-            // Iterate submeshes
-            for (let s = 0; s < submeshes.length; s++) {
-                const submesh = submeshes[s];
-                const matIdx = submesh.materialIndex;
-                const shader = (matIdx !== undefined ? actor.shaders[matIdx] : undefined) ?? actor.shaders[s] ?? actor.shaders[0];
-                if (!shader || !(shader instanceof ShaderWGPU)) continue;
+            const isLegacyLayout = (shader.meta.instanceGroupIndex ?? shader.meta.entityGroupIndex) === shader.meta.cameraGroupIndex;
 
+            if (!isLegacyLayout) {
+                // Slot 0: Camera (PerFrame)
+                if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
+                    if (!lastBoundCameraTable) {
+                        const cameraTable = this._getCameraBindTable(device, shader);
+                        if (cameraTable) {
+                            pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
+                            lastBoundCameraTable = cameraTable;
+                        }
+                    }
+                }
+            }
 
-                // Set pipeline
-                if (lastBoundPipeline !== shader.pipeline.native) {
-                    pass.setPipeline(shader.pipeline.native);
-                    lastBoundPipeline = shader.pipeline.native;
-                    lastBoundCameraTable = undefined;
+            for (let it = 0; it < items.length; it++) {
+                const item = items[it];
+                const actor = item.actor;
+                const mesh = item.mesh;
+                const submesh = item.submesh;
+
+                // Bind vertex and index buffers once per mesh
+                if (lastBoundMesh !== mesh) {
+                    pass.setVertexBuffer(0, mesh.vertexBuffer.native);
+                    if (mesh.indexBuffer) {
+                        const indexFormat = mesh.cpu.indexBytes instanceof Uint32Array ? "uint32" : "uint16";
+                        pass.setIndexBuffer(mesh.indexBuffer.native, indexFormat);
+                    }
+                    lastBoundMesh = mesh;
                 }
 
-                // Check layout architecture: multi-group vs combined legacy 2-group
-                const isLegacyLayout = (shader.meta.instanceGroupIndex ?? shader.meta.entityGroupIndex) === shader.meta.cameraGroupIndex;
-
                 if (isLegacyLayout) {
-                    // Combined Group 0: Instance Transform and Camera
                     const legacyGroup0 = this._createLegacyGroup0(
                         device,
                         shader,
-                        camera,
+                        cam,
                         actor.transform,
                         actor.normalMatrix
                     );
                     if (legacyGroup0) pass.setBindGroup(0, legacyGroup0);
                 } else {
-                    // Slot 0: Camera (PerFrame)
-                    if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
-                        if (!lastBoundCameraTable) {
-                            const cameraTable = this._getCameraBindTable(device, shader);
-                            if (cameraTable) {
-                                pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
-                                lastBoundCameraTable = cameraTable;
-                            }
-                        }
-                    }
-
                     // Slot 2: Instance Transform Storage Buffer (PerInstance dynamic offset)
                     if (shader.meta.hasTransform && shader.bindGroupLayouts.length > 2) {
                         const instanceTable = this._getInstanceBindTable(device, shader);
@@ -375,7 +441,7 @@ export class MeshRendererWGPU {
                             pass.setBindGroup(
                                 shader.meta.instanceGroupIndex ?? 2,
                                 instanceTable.native,
-                                [dynamicOffset]
+                                [item.dynamicOffset]
                             );
                         }
                     }
@@ -384,26 +450,27 @@ export class MeshRendererWGPU {
                 // Slot 1: Material Parameters (PerBatch)
                 const materialGroupIdx = shader.meta.materialGroupIndex ?? 1;
                 if (shader.bindGroupLayouts.length > materialGroupIdx) {
-                    const actorParams = (matIdx !== undefined ? actor.params[matIdx] : undefined) ?? actor.params[s] ?? actor.params[0];
+                    const actorSubmeshParams = item.params;
 
-                    const mergedParams: ShaderParams = {
-                        floats: {
-                            ...shader.defaultParams.floats,
-                            ...actorParams?.floats,
-                        },
-                        vectors: {
-                            ...shader.defaultParams.vectors,
-                            ...actorParams?.vectors,
-                        },
-                        textures: {
-                            ...shader.defaultParams.textures,
-                            ...actorParams?.textures,
-                        },
-                        samplers: {
-                            ...shader.defaultParams.samplers,
-                            ...actorParams?.samplers,
-                        },
-                    };
+                    let mergedParams: ShaderParams;
+                    if (!actorSubmeshParams) {
+                        mergedParams = shader.defaultParams;
+                    } else {
+                        mergedParams = {
+                            floats: actorSubmeshParams.floats
+                                ? { ...shader.defaultParams.floats, ...actorSubmeshParams.floats }
+                                : shader.defaultParams.floats,
+                            vectors: actorSubmeshParams.vectors
+                                ? { ...shader.defaultParams.vectors, ...actorSubmeshParams.vectors }
+                                : shader.defaultParams.vectors,
+                            textures: actorSubmeshParams.textures
+                                ? { ...shader.defaultParams.textures, ...actorSubmeshParams.textures }
+                                : shader.defaultParams.textures,
+                            samplers: actorSubmeshParams.samplers
+                                ? { ...shader.defaultParams.samplers, ...actorSubmeshParams.samplers }
+                                : shader.defaultParams.samplers,
+                        };
+                    }
 
                     const materialTable = this._getMaterialBindTable(device, shader, mergedParams);
                     if (materialTable && lastBoundMaterial !== materialTable) {
@@ -427,13 +494,13 @@ export class MeshRendererWGPU {
                 if (mesh.indexBuffer) {
                     pass.drawIndexed(
                         submesh.indexCount,
-                        instanceCount,
+                        item.instanceCount,
                         submesh.firstIndex,
                         submesh.baseVertex ?? 0,
                         0
                     );
                 } else {
-                    pass.draw(submesh.indexCount, instanceCount, submesh.firstIndex, 0);
+                    pass.draw(submesh.indexCount, item.instanceCount, submesh.firstIndex, 0);
                 }
             }
         }
@@ -635,13 +702,13 @@ export class MeshRendererWGPU {
                 const data = new Float32Array(byteSize / 4);
 
                 let offset = 0;
-                for (const f of bindings.floats) {
-                    data[offset++] = params.floats?.[f] ?? (shader.defaultParams.floats?.[f] ?? 0.0);
-                }
                 for (const v of bindings.vectors) {
                     const val = params.vectors?.[v] ?? (shader.defaultParams.vectors?.[v] ?? [0, 0, 0, 0]);
                     data.set(val, offset);
                     offset += 4;
+                }
+                for (const f of bindings.floats) {
+                    data[offset++] = params.floats?.[f] ?? (shader.defaultParams.floats?.[f] ?? 0.0);
                 }
                 paramBuf.write(device, data);
 
@@ -653,7 +720,7 @@ export class MeshRendererWGPU {
 
             // 2. Texture Parameters
             for (const texName of bindings.textures) {
-                const rawTex = params.textures?.[texName] ?? (params.textures ? Object.values(params.textures)[0] : undefined);
+                const rawTex = params.textures?.[texName];
                 let texView: GPUTextureView;
                 if (rawTex instanceof TextureWGPU) {
                     texView = rawTex.view;
@@ -672,11 +739,8 @@ export class MeshRendererWGPU {
             // 3. Sampler Parameters
             for (const smpName of bindings.samplers) {
                 let sampler: GPUSampler | undefined = params.samplers?.[smpName];
-                if (!sampler && params.textures) {
-                    const matchingTex = params.textures[smpName] ?? Object.values(params.textures)[0];
-                    if (matchingTex instanceof TextureWGPU) {
-                        sampler = matchingTex.sampler;
-                    }
+                if (!sampler && params.textures?.[smpName] instanceof TextureWGPU) {
+                    sampler = (params.textures[smpName] as TextureWGPU).sampler;
                 }
                 if (!sampler) {
                     if (!this._fallbackSampler) {

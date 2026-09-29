@@ -12,6 +12,7 @@ export type WgslDataType =
     | "vec2<i32>"
     | "vec3<i32>"
     | "vec4<i32>"
+    | "bool"
     | "texture_2d<f32>"
     | "sampler"
     | "layout_token";

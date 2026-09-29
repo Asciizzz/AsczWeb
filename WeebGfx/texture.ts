@@ -6,17 +6,20 @@ export class TextureCPU {
     height: number;
     format: string;
     pixels: ArrayBufferView;
+    sampler?: GPUSamplerDescriptor;
 
     constructor(
         width: number,
         height: number,
         format: string,
-        pixels: ArrayBufferView
+        pixels: ArrayBufferView,
+        sampler?: GPUSamplerDescriptor
     ) {
         this.width = width;
         this.height = height;
         this.format = format;
         this.pixels = pixels;
+        this.sampler = sampler;
     }
 }
 

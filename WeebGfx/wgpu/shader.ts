@@ -31,6 +31,19 @@ export interface ShaderGroupMetaWGPU {
 }
 
 /**
+ * Fixed-function raster pipeline configuration metadata.
+ */
+export interface PipelineConfigWGPU {
+    cullMode?: GPUCullMode;
+    frontFace?: GPUFrontFace;
+    topology?: GPUPrimitiveTopology;
+    blend?: GPUBlendState;
+    depthWriteEnabled?: boolean;
+    depthCompare?: GPUCompareFunction;
+    order?: number;
+}
+
+/**
  * WebGPU implementation of ShaderGPU wrapping RasterPipeline and bind layouts.
  */
 export class ShaderWGPU extends ShaderGPU {
@@ -40,6 +53,7 @@ export class ShaderWGPU extends ShaderGPU {
     wgslCode: string;
     paramBindings?: ParamBindingsWGPU;
     meta: ShaderGroupMetaWGPU;
+    pipelineConfig?: PipelineConfigWGPU;
 
     constructor(
         pipeline: RasterPipeline,
@@ -48,14 +62,17 @@ export class ShaderWGPU extends ShaderGPU {
         defaultParams: ShaderParams = {},
         paramBindings?: ParamBindingsWGPU,
         meta?: Partial<ShaderGroupMetaWGPU>,
-        bindLayouts?: BindLayout[]
+        bindLayouts?: BindLayout[],
+        order: number = 0,
+        pipelineConfig?: PipelineConfigWGPU
     ) {
-        super(defaultParams, wgslCode);
+        super(defaultParams, wgslCode, order);
         this.pipeline = pipeline;
         this.bindGroupLayouts = bindGroupLayouts;
         this.wgslCode = wgslCode;
         this.paramBindings = paramBindings;
         this.bindLayouts = bindLayouts;
+        this.pipelineConfig = pipelineConfig;
 
         const instanceGroupIndex = meta?.instanceGroupIndex ?? meta?.entityGroupIndex ?? 2;
         const hasTransform = meta?.hasTransform ?? meta?.hasEntityTransform ?? (wgslCode.includes("u_instances") || wgslCode.includes("InstanceData") || wgslCode.includes("u_entity") || wgslCode.includes("EntityUniforms"));

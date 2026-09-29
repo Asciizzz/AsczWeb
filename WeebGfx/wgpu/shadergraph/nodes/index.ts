@@ -34,3 +34,12 @@ export {
     CameraNode,
     UniformMatrixNode,
 } from "./camera.js";
+
+export {
+    DiscardNode,
+    CompareNode,
+    type CompareOp,
+    LogicNode,
+    type LogicOp,
+    SplitVec4Node,
+} from "./logic.js";

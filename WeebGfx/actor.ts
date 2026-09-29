@@ -21,35 +21,6 @@ export interface InstanceData {
     count: number;
 }
 
-export interface ActorOptions {
-    /** Target GPU mesh */
-    mesh: MeshGPU;
-
-    /** Single shader for all submeshes or array per submesh */
-    shaders?: ShaderGPU | (ShaderGPU | null)[];
-
-    /** Material parameters per submesh or single uniform collection */
-    params?: ShaderParams | ShaderParams[];
-
-    /** 4x4 World matrix for single instance */
-    transform?: Float32Array | ArrayLike<number>;
-
-    /** Optional 4x4 normal matrix for single instance */
-    normalMatrix?: Float32Array | ArrayLike<number>;
-
-    /** Optional skeletal skinning joint matrices */
-    skin?: SkinData | Float32Array;
-
-    /** Optional blendshape / morph weights */
-    morph?: MorphData;
-
-    /** Instance transforms or contiguous matrix buffer */
-    instances?: InstanceData | Float32Array;
-
-    /** Number of instances to draw */
-    instanceCount?: number;
-}
-
 const IDENTITY_MAT4 = new Float32Array([
     1, 0, 0, 0,
     0, 1, 0, 0,
@@ -58,119 +29,58 @@ const IDENTITY_MAT4 = new Float32Array([
 ]);
 
 /**
- * Atomic draw item holding mesh, shaders, material parameters, instance transforms,
- * and skeletal skinning data.
+ * Shader pass bucket mapping a shader to its target submesh indices and parameters.
+ */
+export interface ActorPass {
+    shader: ShaderGPU;
+    submeshIndices: number[];
+    params: (ShaderParams | null)[];
+}
+
+/**
+ * Atomic draw item holding mesh, shader pass buckets,
+ * instance transforms, and skeletal skinning data.
  */
 export class Actor {
-    mesh: MeshGPU;
-    shaders: (ShaderGPU | null)[];
-    params: ShaderParams[];
-    skin?: SkinData;
-    morph?: MorphData;
+    public mesh: MeshGPU;
+
+    /**
+     * Shader passes bucketed by shader.
+     * Each pass specifies a shader, target submesh indices, and per-submesh parameters.
+     */
+    public passes: ActorPass[] = [];
 
     /** Unified instance transform storage. Single entity = 1 instance. */
-    instances: InstanceData;
+    public instances: InstanceData;
+
+    public skin?: SkinData;
+    public morph?: MorphData;
 
     constructor(
-        meshOrOptions: MeshGPU | ActorOptions,
-        shader?: ShaderGPU | (ShaderGPU | null)[],
+        mesh: MeshGPU,
+        shader?: ShaderGPU | ActorPass | ActorPass[],
         transform?: Float32Array | ArrayLike<number>
     ) {
-        if ("mesh" in meshOrOptions && typeof (meshOrOptions as any).mesh === "object") {
-            const opts = meshOrOptions as ActorOptions;
-            this.mesh = opts.mesh;
+        this.mesh = mesh;
+        this.passes = [];
 
-            if (Array.isArray(opts.shaders)) {
-                this.shaders = [...opts.shaders];
-            } else if (opts.shaders) {
-                this.shaders = [opts.shaders];
-            } else {
-                this.shaders = [];
-            }
+        const mat = transform
+            ? (transform instanceof Float32Array ? transform : new Float32Array(transform))
+            : new Float32Array(IDENTITY_MAT4);
 
-            if (Array.isArray(opts.params)) {
-                this.params = [...opts.params];
-            } else if (opts.params) {
-                this.params = [opts.params];
-            } else {
-                this.params = [];
-            }
+        this.instances = {
+            matrices: mat,
+            count: 1,
+        };
 
-            if (opts.instances) {
-                if (opts.instances instanceof Float32Array) {
-                    const norm = opts.normalMatrix
-                        ? (opts.normalMatrix instanceof Float32Array ? opts.normalMatrix : new Float32Array(opts.normalMatrix))
-                        : undefined;
-                    this.instances = {
-                        matrices: opts.instances,
-                        normalMatrices: norm,
-                        count: opts.instanceCount ?? Math.floor(opts.instances.length / 16),
-                    };
-                    if (opts.transform) {
-                        this.instances.matrices.set(opts.transform, 0);
-                    }
-                } else {
-                    this.instances = {
-                        matrices: opts.instances.matrices,
-                        normalMatrices: opts.instances.normalMatrices,
-                        count: opts.instanceCount ?? opts.instances.count,
-                    };
-                    if (opts.transform) {
-                        this.instances.matrices.set(opts.transform, 0);
-                    }
-                }
-            } else if (opts.transform) {
-                const mat = opts.transform instanceof Float32Array
-                    ? opts.transform
-                    : new Float32Array(opts.transform);
-                const norm = opts.normalMatrix
-                    ? (opts.normalMatrix instanceof Float32Array ? opts.normalMatrix : new Float32Array(opts.normalMatrix))
-                    : undefined;
-                this.instances = {
-                    matrices: mat,
-                    normalMatrices: norm,
-                    count: opts.instanceCount ?? 1,
-                };
-            } else {
-                this.instances = {
-                    matrices: new Float32Array(IDENTITY_MAT4),
-                    count: opts.instanceCount ?? 1,
-                };
-            }
-
-            if (opts.skin) {
-                if (opts.skin instanceof Float32Array) {
-                    this.skin = {
-                        jointMatrices: opts.skin,
-                        jointCount: Math.floor(opts.skin.length / 16),
-                    };
-                } else {
-                    this.skin = opts.skin;
-                }
-            }
-
-            this.morph = opts.morph;
-        } else {
-            this.mesh = meshOrOptions as MeshGPU;
-
+        if (shader) {
             if (Array.isArray(shader)) {
-                this.shaders = [...shader];
-            } else if (shader) {
-                this.shaders = [shader];
+                this.passes = [...shader];
+            } else if ("submeshIndices" in shader) {
+                this.passes = [shader];
             } else {
-                this.shaders = [];
+                this.addPass(shader);
             }
-
-            this.params = [];
-
-            const mat = transform
-                ? (transform instanceof Float32Array ? transform : new Float32Array(transform))
-                : new Float32Array(IDENTITY_MAT4);
-
-            this.instances = {
-                matrices: mat,
-                count: 1,
-            };
         }
     }
 
@@ -193,15 +103,10 @@ export class Actor {
             this.instances.normalMatrices = undefined;
             return;
         }
-        if (!this.instances.normalMatrices || this.instances.normalMatrices.length < 16) {
-            this.instances.normalMatrices = new Float32Array(16);
-        }
-        if (norm instanceof Float32Array && norm.length === 16) {
-            this.instances.normalMatrices.set(norm, 0);
+        if (norm instanceof Float32Array) {
+            this.instances.normalMatrices = norm;
         } else {
-            for (let i = 0; i < 16 && i < norm.length; i++) {
-                this.instances.normalMatrices[i] = norm[i];
-            }
+            this.instances.normalMatrices = new Float32Array(norm);
         }
     }
 
@@ -215,6 +120,145 @@ export class Actor {
     }
 
     /**
+     * Adds a pass bucket targeting the specified submesh indices with optional parameters.
+     * When submeshIndices is omitted, targets all submeshes in the mesh.
+     */
+    addPass(
+        shader: ShaderGPU,
+        submeshIndices?: number | number[],
+        params?: ShaderParams | (ShaderParams | null)[] | null
+    ): this {
+        const subCount = this.mesh?.submeshes?.length ?? 1;
+        let indices: number[];
+        if (submeshIndices === undefined) {
+            indices = Array.from({ length: subCount }, (_, i) => i);
+        } else if (Array.isArray(submeshIndices)) {
+            indices = [...submeshIndices];
+        } else {
+            indices = [submeshIndices];
+        }
+
+        let pList: (ShaderParams | null)[];
+        if (Array.isArray(params)) {
+            pList = [...params];
+        } else if (params !== undefined && params !== null) {
+            pList = Array(indices.length).fill(params);
+        } else {
+            pList = Array(indices.length).fill(null);
+        }
+
+        while (pList.length < indices.length) {
+            pList.push(null);
+        }
+
+        let existingPass = this.passes.find((p) => p.shader === shader);
+        if (!existingPass) {
+            existingPass = {
+                shader,
+                submeshIndices: [],
+                params: [],
+            };
+            this.passes.push(existingPass);
+        }
+
+        for (let i = 0; i < indices.length; i++) {
+            const smIdx = indices[i];
+            const existingIdx = existingPass.submeshIndices.indexOf(smIdx);
+            if (existingIdx !== -1) {
+                if (pList[i] !== null) {
+                    existingPass.params[existingIdx] = pList[i];
+                }
+            } else {
+                existingPass.submeshIndices.push(smIdx);
+                existingPass.params.push(pList[i]);
+            }
+        }
+
+        return this;
+    }
+
+    /**
+     * Clears all passes and adds a single shader pass.
+     */
+    setPass(
+        shader: ShaderGPU,
+        submeshIndices?: number | number[],
+        params?: ShaderParams | (ShaderParams | null)[] | null
+    ): this {
+        this.passes = [];
+        return this.addPass(shader, submeshIndices, params);
+    }
+
+    /**
+     * Finds existing pass for shader if present.
+     */
+    getPass(shader: ShaderGPU): ActorPass | undefined {
+        return this.passes.find((p) => p.shader === shader);
+    }
+
+    /**
+     * Removes pass matching shader.
+     */
+    removePass(shader: ShaderGPU): this {
+        this.passes = this.passes.filter((p) => p.shader !== shader);
+        return this;
+    }
+
+    /**
+     * Clears all passes.
+     */
+    clearPasses(): this {
+        this.passes = [];
+        return this;
+    }
+
+    /**
+     * Sets parameter override for a specific submesh or all submeshes in a pass.
+     */
+    setPassParams(
+        shader: ShaderGPU,
+        params: ShaderParams | null,
+        submeshIndex?: number
+    ): this {
+        const pass = this.getPass(shader);
+        if (!pass) return this;
+
+        if (submeshIndex !== undefined) {
+            const idx = pass.submeshIndices.indexOf(submeshIndex);
+            if (idx !== -1) {
+                pass.params[idx] = params;
+            } else {
+                pass.submeshIndices.push(submeshIndex);
+                pass.params.push(params);
+            }
+        } else {
+            for (let i = 0; i < pass.params.length; i++) {
+                pass.params[i] = params;
+            }
+        }
+        return this;
+    }
+
+    /** Checks if submesh index is present in any pass. */
+    isSubmeshVisible(submeshIndex: number): boolean {
+        return this.passes.some((p) => p.submeshIndices.includes(submeshIndex));
+    }
+
+    /** Toggles visibility for specified submesh index across all passes. */
+    setSubmeshVisible(submeshIndex: number, visible: boolean): this {
+        if (!visible) {
+            for (const pass of this.passes) {
+                const idx = pass.submeshIndices.indexOf(submeshIndex);
+                if (idx !== -1) {
+                    pass.submeshIndices.splice(idx, 1);
+                    pass.params.splice(idx, 1);
+                }
+            }
+        }
+        return this;
+    }
+
+    /**
      * Sets world matrix and optional normal matrix for a single instance.
      * Resets active instance count to 1.
      */
@@ -225,7 +269,6 @@ export class Actor {
         if (this.instances.matrices.length < 16) {
             this.instances.matrices = new Float32Array(16);
         }
-
         if (world instanceof Float32Array && world.length === 16) {
             this.instances.matrices.set(world, 0);
         } else {
@@ -271,22 +314,6 @@ export class Actor {
                 count: count ?? instances.count,
             };
         }
-        return this;
-    }
-
-    /**
-     * Sets shader for specified submesh index.
-     */
-    setShader(shader: ShaderGPU | null, submeshIndex = 0): this {
-        this.shaders[submeshIndex] = shader;
-        return this;
-    }
-
-    /**
-     * Sets material parameters for specified submesh index.
-     */
-    setParams(params: ShaderParams, submeshIndex = 0): this {
-        this.params[submeshIndex] = params;
         return this;
     }
 

@@ -4,6 +4,7 @@ export {
     ShaderWGPU,
     type ParamBindingsWGPU,
     type ShaderGroupMetaWGPU,
+    type PipelineConfigWGPU,
 } from "./shader.js";
 export {
     MeshRendererWGPU,
@@ -11,7 +12,6 @@ export {
     type RenderTarget,
     type RenderOptions,
     type DrawMeshOptions,
-    type MeshRendererOptions,
 } from "./renderer.js";
 
 // WebGPU Shader Graph Subsystem

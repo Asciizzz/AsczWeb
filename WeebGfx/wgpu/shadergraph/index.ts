@@ -19,8 +19,16 @@ export {
     MultiplyNode,
     UniformMatrixNode,
     CameraNode,
+    DiscardNode,
+    CompareNode,
+    type CompareOp,
+    LogicNode,
+    type LogicOp,
+    SplitVec4Node,
 } from "./nodes/index.js";
 export {
     ShaderGraphWGPU,
     type ShaderSourceWGPU,
+    type ShaderGraphConfigWGPU,
+    type CompileOptionsWGPU,
 } from "./compiler.js";

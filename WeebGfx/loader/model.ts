@@ -1,7 +1,8 @@
 import type { MeshCPU, MeshGPU } from "../mesh.js";
 import type { TextureCPU, TextureGPU } from "../texture.js";
 import type { SkeletonCPU } from "../skeleton.js";
-import type { Actor, ActorOptions } from "../actor.js";
+import type { Actor, ActorPass } from "../actor.js";
+import type { ShaderGPU } from "../shader.js";
 
 /**
  * CPU material parameter container parsed from asset metadata.
@@ -48,7 +49,7 @@ export abstract class ModelGPU {
     /**
      * Stamped Actor factory creating independent render units with separate transform streams.
      */
-    abstract createActor(options?: Partial<ActorOptions>): Actor;
+    abstract createActor(shader?: ShaderGPU | ShaderGPU[] | ActorPass[]): Actor;
 
     /**
      * Disposes underlying GPU mesh, texture, and pipeline resources.

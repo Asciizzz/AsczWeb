@@ -486,21 +486,23 @@ function extractSkeleton(gltf: any, resolvedBuffers: ArrayBuffer[]): SkeletonCPU
         const node = nodes[nodeIndex];
         const name = node?.name ?? `joint_${j}`;
 
-        // Find parent joint in skin
+        // Find parent joint in skin and record any non-joint ancestors
         let parentJointIndex = -1;
         let curr = parentMap.get(nodeIndex);
+        const nonJointChain: number[] = [];
         while (curr !== undefined) {
             if (nodeToJoint.has(curr)) {
                 parentJointIndex = nodeToJoint.get(curr)!;
                 break;
             }
+            nonJointChain.push(curr);
             curr = parentMap.get(curr);
         }
 
         // Local matrix
-        let localMat: Float32Array;
+        let localMat: Mat4;
         if (node?.matrix) {
-            localMat = new Float32Array(node.matrix);
+            localMat = new Mat4(node.matrix);
         } else if (node) {
             const pos = node.translation ?? [0, 0, 0];
             const rot = node.rotation ?? [0, 0, 0, 1];
@@ -508,6 +510,22 @@ function extractSkeleton(gltf: any, resolvedBuffers: ArrayBuffer[]): SkeletonCPU
             localMat = Mat4.fromTRS(pos, rot, scl);
         } else {
             localMat = Mat4.identity();
+        }
+
+        // Premultiply non-joint ancestors so joint world matrix reaches scene space
+        for (const ancestorIdx of nonJointChain) {
+            const aNode = nodes[ancestorIdx];
+            if (!aNode) continue;
+            let aMat: Mat4;
+            if (aNode.matrix) {
+                aMat = new Mat4(aNode.matrix);
+            } else {
+                const pos = aNode.translation ?? [0, 0, 0];
+                const rot = aNode.rotation ?? [0, 0, 0, 1];
+                const scl = aNode.scale ?? [1, 1, 1];
+                aMat = Mat4.fromTRS(pos, rot, scl);
+            }
+            localMat = aMat.mul(localMat, new Mat4());
         }
 
         // Inverse bind matrix
@@ -620,7 +638,7 @@ export function parseGLTFJson(
         const baseVertexOffset = currentVertex;
         const world = item.worldTransform;
         const normMat = item.normalTransform;
-        const bakeTransform = !item.isSkinned;
+        const bakeTransform = !isSkinned || !item.isSkinned;
 
         // Populate vertices
         for (let i = 0; i < vCount; i++) {
@@ -707,17 +725,34 @@ export function parseGLTFJson(
         // Indices
         const firstIndex = currentIndex;
         let indexCount = 0;
+        const isFlipped = bakeTransform && item.worldTransform.determinant() < 0;
 
         if (prim.indices !== undefined) {
             const idxReader = createAccessorReader(gltf, prim.indices, resolvedBuffers);
             indexCount = idxReader.count;
-            for (let i = 0; i < indexCount; i++) {
-                indexArray[currentIndex++] = baseVertexOffset + idxReader.get(i, 0);
+            if (isFlipped) {
+                for (let i = 0; i < indexCount; i += 3) {
+                    indexArray[currentIndex++] = baseVertexOffset + idxReader.get(i, 0);
+                    indexArray[currentIndex++] = baseVertexOffset + idxReader.get(i + 2, 0);
+                    indexArray[currentIndex++] = baseVertexOffset + idxReader.get(i + 1, 0);
+                }
+            } else {
+                for (let i = 0; i < indexCount; i++) {
+                    indexArray[currentIndex++] = baseVertexOffset + idxReader.get(i, 0);
+                }
             }
         } else {
             indexCount = vCount;
-            for (let i = 0; i < indexCount; i++) {
-                indexArray[currentIndex++] = baseVertexOffset + i;
+            if (isFlipped) {
+                for (let i = 0; i < indexCount; i += 3) {
+                    indexArray[currentIndex++] = baseVertexOffset + i;
+                    indexArray[currentIndex++] = baseVertexOffset + i + 2;
+                    indexArray[currentIndex++] = baseVertexOffset + i + 1;
+                }
+            } else {
+                for (let i = 0; i < indexCount; i++) {
+                    indexArray[currentIndex++] = baseVertexOffset + i;
+                }
             }
         }
 
@@ -811,13 +846,6 @@ export function parseGLTFJson(
                 doubleSided: m.doubleSided ?? false,
             });
         }
-    } else {
-        materials.push({
-            name: "DefaultMaterial",
-            baseColorFactor: [1, 1, 1, 1],
-            metallicFactor: 1.0,
-            roughnessFactor: 1.0,
-        });
     }
 
     // Textures & Images
@@ -845,27 +873,10 @@ export function parseGLTFJson(
                 }
             }
 
-            // Fallback 1x1 white texture if unparsed
-            if (!texCpu) {
-                texCpu = new TextureCPU(
-                    1,
-                    1,
-                    "rgba8unorm",
-                    new Uint8Array([255, 255, 255, 255])
-                );
+            if (texCpu) {
+                textures.push(texCpu);
             }
-            textures.push(texCpu);
         }
-    } else {
-        // Fallback texture for material slot 0
-        textures.push(
-            new TextureCPU(
-                1,
-                1,
-                "rgba8unorm",
-                new Uint8Array([255, 255, 255, 255])
-            )
-        );
     }
 
     return {
@@ -895,60 +906,301 @@ export function parseGLTF(gltfOrJson: string | object, options?: GLTFParseOption
     return parseGLTFJson(json, resolvedBuffers, options);
 }
 
+function guessMimeType(data: Uint8Array): string {
+    if (data.length >= 4) {
+        if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) {
+            return "image/png";
+        }
+        if (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+            return "image/jpeg";
+        }
+        if (data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46) {
+            return "image/webp";
+        }
+    }
+    return "image/png";
+}
+
+export function parseGLTFSampler(smp: any): GPUSamplerDescriptor {
+    const desc: GPUSamplerDescriptor = {
+        magFilter: smp.magFilter === 9728 ? "nearest" : "linear",
+        minFilter: smp.minFilter === 9728 || smp.minFilter === 9984 || smp.minFilter === 9986 ? "nearest" : "linear",
+        mipmapFilter: smp.minFilter === 9984 || smp.minFilter === 9985 ? "nearest" : "linear",
+        addressModeU: smp.wrapS === 33071 ? "clamp-to-edge" : smp.wrapS === 33648 ? "mirror-repeat" : "repeat",
+        addressModeV: smp.wrapT === 33071 ? "clamp-to-edge" : smp.wrapT === 33648 ? "mirror-repeat" : "repeat",
+    };
+    return desc;
+}
+
+export async function decodeImageToTexture(
+    data: Uint8Array,
+    mimeType?: string
+): Promise<TextureCPU | null> {
+    const type = mimeType || guessMimeType(data);
+
+    // 1. Try createImageBitmap in browser/worker environments
+    if (typeof createImageBitmap === "function") {
+        try {
+            const blob = new Blob([data as any], { type });
+            const bitmap = await createImageBitmap(blob);
+            const width = bitmap.width;
+            const height = bitmap.height;
+
+            let canvas: any;
+            if (typeof OffscreenCanvas !== "undefined") {
+                canvas = new OffscreenCanvas(width, height);
+            } else if (typeof document !== "undefined") {
+                canvas = document.createElement("canvas");
+                canvas.width = width;
+                canvas.height = height;
+            }
+
+            if (canvas) {
+                const ctx = canvas.getContext("2d");
+                if (ctx) {
+                    ctx.drawImage(bitmap, 0, 0);
+                    const imgData = ctx.getImageData(0, 0, width, height);
+                    bitmap.close?.();
+                    return new TextureCPU(
+                        width,
+                        height,
+                        "rgba8unorm",
+                        new Uint8Array(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength)
+                    );
+                }
+            }
+            bitmap.close?.();
+        } catch {}
+    }
+
+    // 2. Try HTMLImageElement fallback in standard DOM environments
+    if (typeof Image !== "undefined" && typeof document !== "undefined" && typeof URL !== "undefined") {
+        try {
+            const blob = new Blob([data as any], { type });
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            await new Promise<void>((resolve, reject) => {
+                img.onload = () => resolve();
+                img.onerror = (e) => reject(e);
+                img.src = url;
+            });
+            URL.revokeObjectURL(url);
+
+            const width = img.naturalWidth || img.width;
+            const height = img.naturalHeight || img.height;
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                ctx.drawImage(img, 0, 0);
+                const imgData = ctx.getImageData(0, 0, width, height);
+                return new TextureCPU(
+                    width,
+                    height,
+                    "rgba8unorm",
+                    new Uint8Array(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength)
+                );
+            }
+        } catch {}
+    }
+
+    return null;
+}
+
+async function fetchOrReadUri(uri: string, basePath?: string): Promise<Uint8Array | undefined> {
+    if (uri.startsWith("data:")) {
+        return decodeDataUri(uri);
+    }
+
+    let fullPath = uri;
+    if (basePath) {
+        fullPath = basePath.replace(/[\\/]$/, "") + "/" + uri.replace(/^[\\/]/, "");
+    }
+
+    if (typeof fetch === "function") {
+        try {
+            const res = await fetch(fullPath);
+            if (res.ok) {
+                const buf = await res.arrayBuffer();
+                return new Uint8Array(buf);
+            }
+        } catch {}
+    }
+
+    const g = globalThis as any;
+    if (g.process && g.process.versions?.node) {
+        try {
+            const fsMod = "fs/promises";
+            const fs = await import(/* @vite-ignore */ fsMod);
+            const fileBuf = await fs.readFile(fullPath);
+            return new Uint8Array(fileBuf.buffer, fileBuf.byteOffset, fileBuf.byteLength);
+        } catch {}
+    }
+
+    return undefined;
+}
+
 /**
- * Asynchronously loads GLTF or GLB model from path, URL, or buffer.
+ * Asynchronously loads GLTF or GLB model from path, URL, or buffer, resolving buffers and textures.
  */
 export async function loadGLTF(
     source: string | ArrayBuffer | Uint8Array,
     options?: GLTFLoadOptions
 ): Promise<ModelCPU> {
+    let json: any;
+    let resolvedBuffers: ArrayBuffer[];
+
     if (source instanceof ArrayBuffer || source instanceof Uint8Array) {
         const rawBuf = source instanceof Uint8Array ? source.buffer : source;
         const view = new DataView(rawBuf, source instanceof Uint8Array ? source.byteOffset : 0);
         if (view.getUint32(0, true) === GLB_MAGIC) {
-            return parseGLB(source, options);
+            const { json: glbJson, binChunk } = unpackGLB(source);
+            json = glbJson;
+            resolvedBuffers = resolveBuffers(json, binChunk, options);
+        } else {
+            const text = new TextDecoder().decode(source);
+            json = JSON.parse(text);
+            resolvedBuffers = resolveBuffers(json, undefined, options);
         }
-        const text = new TextDecoder().decode(source);
-        return parseGLTF(text, options);
-    }
+    } else if (typeof source === "string") {
+        if (!options?.basePath) {
+            const lastSlash = Math.max(source.lastIndexOf("/"), source.lastIndexOf("\\"));
+            if (lastSlash !== -1) {
+                options = { ...options, basePath: source.substring(0, lastSlash + 1) };
+            }
+        }
 
-    if (typeof source === "string") {
-        let arrayBuffer: ArrayBuffer;
+        let arrayBuffer: ArrayBuffer | undefined;
 
         if (typeof fetch === "function") {
             try {
                 const res = await fetch(source);
                 if (res.ok) {
                     arrayBuffer = await res.arrayBuffer();
-                    const view = new DataView(arrayBuffer);
-                    if (view.getUint32(0, true) === GLB_MAGIC) {
-                        return parseGLB(arrayBuffer, options);
-                    }
-                    const text = new TextDecoder().decode(arrayBuffer);
-                    return parseGLTF(text, options);
                 }
             } catch {}
         }
 
-        const g = globalThis as any;
-        if (g.process && g.process.versions?.node) {
-            try {
-                const fsMod = "fs/promises";
-                const fs = await import(/* @vite-ignore */ fsMod);
-                const buf = await fs.readFile(source);
-                arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-                const view = new DataView(arrayBuffer);
-                if (view.getUint32(0, true) === GLB_MAGIC) {
-                    return parseGLB(arrayBuffer, options);
-                }
-                const text = new TextDecoder().decode(arrayBuffer);
-                return parseGLTF(text, options);
-            } catch {}
+        if (!arrayBuffer) {
+            const g = globalThis as any;
+            if (g.process && g.process.versions?.node) {
+                try {
+                    const fsMod = "fs/promises";
+                    const fs = await import(/* @vite-ignore */ fsMod);
+                    const buf = await fs.readFile(source);
+                    arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+                } catch {}
+            }
         }
 
+        if (!arrayBuffer) {
+            throw new Error(`[GLTF] Unable to load resource from: ${source}`);
+        }
 
-        throw new Error(`[GLTF] Unable to load resource from: ${source}`);
+        const view = new DataView(arrayBuffer);
+        if (view.getUint32(0, true) === GLB_MAGIC) {
+            const { json: glbJson, binChunk } = unpackGLB(arrayBuffer);
+            json = glbJson;
+            resolvedBuffers = resolveBuffers(json, binChunk, options);
+        } else {
+            const text = new TextDecoder().decode(arrayBuffer);
+            json = JSON.parse(text);
+            resolvedBuffers = resolveBuffers(json, undefined, options);
+        }
+    } else {
+        throw new Error("[GLTF] Unsupported source type provided to loadGLTF.");
     }
 
-    throw new Error("[GLTF] Unsupported source type provided to loadGLTF.");
+    // Resolve any remaining external buffers if needed
+    if (json.buffers && Array.isArray(json.buffers)) {
+        for (let b = 0; b < json.buffers.length; b++) {
+            if (!resolvedBuffers[b]) {
+                const bDesc = json.buffers[b];
+                if (bDesc.uri) {
+                    const data = await fetchOrReadUri(bDesc.uri, options?.basePath);
+                    if (data) {
+                        resolvedBuffers[b] = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+                    }
+                }
+            }
+        }
+    }
+
+    const model = parseGLTFJson(json, resolvedBuffers, options);
+
+    // Asynchronously resolve and decode textures
+    if (json.textures && json.textures.length > 0) {
+        for (let t = 0; t < json.textures.length; t++) {
+            const texDesc = json.textures[t];
+            const imgIdx = texDesc.source ?? t;
+            const imgDesc = json.images?.[imgIdx];
+            if (!imgDesc) continue;
+
+            let imgData: Uint8Array | undefined;
+            if (imgDesc.bufferView !== undefined) {
+                const bv = json.bufferViews[imgDesc.bufferView];
+                const buf = resolvedBuffers[bv.buffer];
+                const offset = bv.byteOffset ?? 0;
+                imgData = new Uint8Array(buf, offset, bv.byteLength);
+            } else if (imgDesc.uri?.startsWith("data:")) {
+                imgData = decodeDataUri(imgDesc.uri);
+            } else if (imgDesc.uri) {
+                imgData = await fetchOrReadUri(imgDesc.uri, options?.basePath);
+            }
+
+            let texCpu: TextureCPU | null = null;
+            if (options?.imageResolver) {
+                const res = await options.imageResolver(imgDesc, imgData);
+                if (res instanceof TextureCPU) {
+                    texCpu = res;
+                }
+            }
+
+            if (!texCpu && imgData) {
+                texCpu = await decodeImageToTexture(imgData, imgDesc.mimeType);
+            }
+
+            if (texCpu) {
+                if (texDesc.sampler !== undefined && json.samplers?.[texDesc.sampler]) {
+                    texCpu.sampler = parseGLTFSampler(json.samplers[texDesc.sampler]);
+                }
+                model.textures[t] = texCpu;
+            }
+        }
+    } else if (json.images && json.images.length > 0) {
+        for (let i = 0; i < json.images.length; i++) {
+            const imgDesc = json.images[i];
+            let imgData: Uint8Array | undefined;
+            if (imgDesc.bufferView !== undefined) {
+                const bv = json.bufferViews[imgDesc.bufferView];
+                const buf = resolvedBuffers[bv.buffer];
+                const offset = bv.byteOffset ?? 0;
+                imgData = new Uint8Array(buf, offset, bv.byteLength);
+            } else if (imgDesc.uri?.startsWith("data:")) {
+                imgData = decodeDataUri(imgDesc.uri);
+            } else if (imgDesc.uri) {
+                imgData = await fetchOrReadUri(imgDesc.uri, options?.basePath);
+            }
+
+            let texCpu: TextureCPU | null = null;
+            if (options?.imageResolver) {
+                const res = await options.imageResolver(imgDesc, imgData);
+                if (res instanceof TextureCPU) {
+                    texCpu = res;
+                }
+            }
+
+            if (!texCpu && imgData) {
+                texCpu = await decodeImageToTexture(imgData, imgDesc.mimeType);
+            }
+
+            if (texCpu) {
+                model.textures[i] = texCpu;
+            }
+        }
+    }
+
+    return model;
 }
