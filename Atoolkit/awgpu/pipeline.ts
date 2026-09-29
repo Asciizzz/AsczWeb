@@ -360,9 +360,14 @@ export class PipelineCache {
             fsKey = `${fsHash}:${fsEp}:${JSON.stringify(desc.fragment.targets)}`;
         }
 
-        const layoutsKey = desc.layouts
-            ? desc.layouts.map(getBindGroupLayoutId).join(",")
-            : "auto";
+        let layoutsKey = "auto";
+        if (desc.layouts && desc.layouts.length > 0) {
+            layoutsKey = "";
+            for (let i = 0; i < desc.layouts.length; i++) {
+                if (i > 0) layoutsKey += ",";
+                layoutsKey += getBindGroupLayoutId(desc.layouts[i]);
+            }
+        }
 
         const dsKey = desc.depthStencil ? JSON.stringify(desc.depthStencil) : "";
         const primKey = desc.primitive ? JSON.stringify(desc.primitive) : "";
@@ -377,9 +382,14 @@ export class PipelineCache {
     static hashComputeDesc(desc: ComputePipelineDesc): string {
         const csHash = hashPipelineString(desc.code);
         const csEp = desc.entryPoint ?? "cs_main";
-        const layoutsKey = desc.layouts
-            ? desc.layouts.map(getBindGroupLayoutId).join(",")
-            : "auto";
+        let layoutsKey = "auto";
+        if (desc.layouts && desc.layouts.length > 0) {
+            layoutsKey = "";
+            for (let i = 0; i < desc.layouts.length; i++) {
+                if (i > 0) layoutsKey += ",";
+                layoutsKey += getBindGroupLayoutId(desc.layouts[i]);
+            }
+        }
 
         return `c:${csHash}:${csEp};l:${layoutsKey}`;
     }

@@ -233,7 +233,8 @@ function onUpdate(timeSec: number, prevTimeSec: number) {
 - `getTrack(name)`: Retrieves track by name, or `undefined` if not registered.
 - `sample(time, target)`: Evaluates all registered tracks at timestamp, writing results into `target[name]`. Reuses existing typed arrays in `target` to maintain zero heap allocations.
 - `addMarker(time, label, data)`: Inserts timeline marker and sorts marker array by time.
-- `sampleCrossedMarkers(previousTime, currentTime)`: Returns array of markers crossed within time window. Evaluates ascending order during forward playback; descending order during reverse playback.
+- `getMarkersInRange(start, end, out?)`: Returns markers located within interval `[start, end]`. Writes into optional `out` array for zero heap allocations.
+- `sampleCrossedMarkers(previousTime, currentTime, out?)`: Returns markers crossed within time window. Writes into optional `out` array for zero heap allocations. Evaluates ascending order during forward playback; descending order during reverse playback.
 - `duration`: Returns maximum duration among registered tracks.
 - `startTime` & `endTime`: Returns bounding time limits across active tracks.
 

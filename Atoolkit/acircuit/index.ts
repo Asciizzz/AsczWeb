@@ -1,7 +1,6 @@
 export {
     Socket,
     type SocketDirection,
-    type SocketOptions,
 } from "./socket.js";
 export {
     Chip,
@@ -9,7 +8,6 @@ export {
 } from "./chip.js";
 export {
     Circuit,
-    type CircuitOptions,
 } from "./circuit.js";
 export {
     Subcircuit,

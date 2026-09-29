@@ -16,10 +16,6 @@ import type {
 } from "./types.js";
 import type { InputSocketMapping, OutputSocketMapping } from "./composite.js";
 
-export interface CircuitOptions {
-    label?: string;
-}
-
 /**
  * Directed graph with 1-to-1 input wires and 1-to-N output fan-out.
  * Chip values exist only in the scope of a run.
@@ -45,8 +41,8 @@ export class Circuit {
         wires: Array<Wire | undefined>;
     }> = [];
 
-    constructor(options: CircuitOptions = {}) {
-        this.label = options.label ?? "Circuit";
+    constructor(label = "Circuit") {
+        this.label = label;
     }
 
     private _addChipWire(map: Map<string, Wire[]>, chipId: string, wire: Wire): void {
@@ -528,8 +524,8 @@ export class Circuit {
      * Extracts an isolated subcircuit containing only the specified target chips,
      * their transitive upstream dependencies, and internal interconnecting wires.
      */
-    extractSubgraph(targetChipIds: string[], options: CircuitOptions = {}): Circuit {
-        const sub = new Circuit({ label: options.label ?? `${this.label}_subgraph` });
+    extractSubgraph(targetChipIds: string[], label?: string): Circuit {
+        const sub = new Circuit(label ?? `${this.label}_subgraph`);
         const retainIds = new Set<string>();
 
         for (let i = 0; i < targetChipIds.length; i++) {
@@ -643,7 +639,7 @@ export class Circuit {
                 : new ChipProxy(c.id, c)
         ));
 
-        const copy = new Circuit({ label: this.label });
+        const copy = new Circuit(this.label);
         for (const chip of this.chips.values()) {
             copy.addChip(cloner(chip));
         }
@@ -696,7 +692,7 @@ export class Circuit {
 
     /** Reconstructs a Circuit graph from serialized JSON using a chip factory. */
     static fromJSON(json: SerializedCircuit, chipFactory: ChipFactory): Circuit {
-        const circuit = new Circuit({ label: json.label });
+        const circuit = new Circuit(json.label);
         for (let i = 0; i < json.chips.length; i++) {
             const chip = chipFactory(json.chips[i]);
             circuit.addChip(chip);

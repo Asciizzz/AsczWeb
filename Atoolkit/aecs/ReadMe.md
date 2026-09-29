@@ -138,15 +138,15 @@ positions.each((entity, coords) => {
 `Query` and `QueryBuilder` evaluate multi-set constraints, automatically selecting the set with smallest cardinality to drive the iteration loop.
 
 ```typescript
-import { createQuery } from "./index.js";
+import { Query, createQuery } from "./index.js";
 
-// Construct query with required, excluded, and optional components
-const query = createQuery()
+// Construct query directly or via createQuery()
+const query = new Query()
     .all(positions, velocities)
     .none(dead)
     .any(burning, frozen);
 
-// Direct iteration
+// Direct iteration with zero allocations on hot paths
 query.each(entity => {
     const pos = positions.get(entity)!;
     const vel = velocities.get(entity)!;
@@ -165,6 +165,7 @@ const matches = query.matches(e1);
 - `none(...sets)`: Excludes entities present in any of the specified sets.
 - `any(...sets)`: Requires entity to be present in at least one of the specified sets.
 - Driver selection: Identifies set in `all` with minimum `size`. Iterates driver's dense entity list and executes O(1) sparse checks against companion sets.
+- Hot-path invariant: `each()` skips non-driver sets via in-place index validation with zero array allocations.
 
 ---
 

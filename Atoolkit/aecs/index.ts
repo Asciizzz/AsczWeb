@@ -15,6 +15,5 @@ export {
     query3,
     type EntitySetLike,
     type ComponentSource,
-    type QueryOptions,
 } from "./Query.js";
 export { join2, join3 } from "./join.js";

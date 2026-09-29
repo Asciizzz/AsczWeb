@@ -83,19 +83,43 @@ export class Clip {
         return this._markers;
     }
 
-    getMarkersInRange(start: number, end: number): ClipMarker[] {
-        return this._markers.filter(m => m.time >= start && m.time <= end);
+    getMarkersInRange(start: number, end: number, out?: ClipMarker[]): ClipMarker[] {
+        const result = out ?? [];
+        result.length = 0;
+        const len = this._markers.length;
+        for (let i = 0; i < len; i++) {
+            const m = this._markers[i];
+            if (m.time >= start && m.time <= end) {
+                result.push(m);
+            }
+        }
+        return result;
     }
 
     /**
      * Identifies markers crossed between previousTime and currentTime.
      * Supports forward and reverse timeline traversal.
      */
-    sampleCrossedMarkers(previousTime: number, currentTime: number): ClipMarker[] {
+    sampleCrossedMarkers(previousTime: number, currentTime: number, out?: ClipMarker[]): ClipMarker[] {
+        const result = out ?? [];
+        result.length = 0;
+        const len = this._markers.length;
         if (currentTime >= previousTime) {
-            return this._markers.filter(m => m.time > previousTime && m.time <= currentTime);
+            for (let i = 0; i < len; i++) {
+                const m = this._markers[i];
+                if (m.time > previousTime && m.time <= currentTime) {
+                    result.push(m);
+                }
+            }
+        } else {
+            for (let i = 0; i < len; i++) {
+                const m = this._markers[i];
+                if (m.time < previousTime && m.time >= currentTime) {
+                    result.push(m);
+                }
+            }
         }
-        return this._markers.filter(m => m.time < previousTime && m.time >= currentTime);
+        return result;
     }
 
     /**

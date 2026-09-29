@@ -16,24 +16,52 @@ export interface ComponentSource<T> extends EntitySetLike {
     get(entity: Entity): T | undefined;
 }
 
-export interface QueryOptions {
-    all?: EntitySetLike[];
-    none?: EntitySetLike[];
-    any?: EntitySetLike[];
-}
-
 /**
  * Multi-set entity query engine with driver set optimization.
  */
 export class Query implements Iterable<Entity> {
-    private readonly _all: EntitySetLike[];
-    private readonly _none: EntitySetLike[];
-    private readonly _any: EntitySetLike[];
+    protected readonly _all: EntitySetLike[] = [];
+    protected readonly _none: EntitySetLike[] = [];
+    protected readonly _any: EntitySetLike[] = [];
 
-    constructor(options: QueryOptions = {}) {
-        this._all = options.all ? [...options.all] : [];
-        this._none = options.none ? [...options.none] : [];
-        this._any = options.any ? [...options.any] : [];
+    constructor(
+        all: EntitySetLike[] = [],
+        none: EntitySetLike[] = [],
+        any: EntitySetLike[] = []
+    ) {
+        if (all.length > 0) {
+            for (let i = 0; i < all.length; i++) this._all.push(all[i]);
+        }
+        if (none.length > 0) {
+            for (let i = 0; i < none.length; i++) this._none.push(none[i]);
+        }
+        if (any.length > 0) {
+            for (let i = 0; i < any.length; i++) this._any.push(any[i]);
+        }
+    }
+
+    /**
+     * Adds required component sets.
+     */
+    all(...sets: EntitySetLike[]): this {
+        for (let i = 0; i < sets.length; i++) this._all.push(sets[i]);
+        return this;
+    }
+
+    /**
+     * Adds excluded component sets.
+     */
+    none(...sets: EntitySetLike[]): this {
+        for (let i = 0; i < sets.length; i++) this._none.push(sets[i]);
+        return this;
+    }
+
+    /**
+     * Adds optional component sets (at least one must match).
+     */
+    any(...sets: EntitySetLike[]): this {
+        for (let i = 0; i < sets.length; i++) this._any.push(sets[i]);
+        return this;
     }
 
     /**
@@ -83,8 +111,8 @@ export class Query implements Iterable<Entity> {
 
             const ents = driver.entities;
             const len = driver.size;
-            const otherAll = this._all.filter(s => s !== driver);
-            const otherCount = otherAll.length;
+            const allSets = this._all;
+            const allCount = allSets.length;
             const noneSets = this._none;
             const noneCount = noneSets.length;
             const anySets = this._any;
@@ -94,8 +122,10 @@ export class Query implements Iterable<Entity> {
             for (let i = 0; i < len; i++) {
                 const entity = ents[i];
 
-                for (let j = 0; j < otherCount; j++) {
-                    if (!otherAll[j].has(entity)) continue entityLoop;
+                for (let j = 0; j < allCount; j++) {
+                    const set = allSets[j];
+                    if (set === driver) continue;
+                    if (!set.has(entity)) continue entityLoop;
                 }
                 for (let j = 0; j < noneCount; j++) {
                     if (noneSets[j].has(entity)) continue entityLoop;
@@ -188,56 +218,9 @@ export class Query implements Iterable<Entity> {
 /**
  * Fluent builder for constructing and executing multi-set queries.
  */
-export class QueryBuilder implements Iterable<Entity> {
-    private readonly _all: EntitySetLike[] = [];
-    private readonly _none: EntitySetLike[] = [];
-    private readonly _any: EntitySetLike[] = [];
-
-    all(...sets: EntitySetLike[]): this {
-        for (let i = 0; i < sets.length; i++) this._all.push(sets[i]);
-        return this;
-    }
-
-    none(...sets: EntitySetLike[]): this {
-        for (let i = 0; i < sets.length; i++) this._none.push(sets[i]);
-        return this;
-    }
-
-    any(...sets: EntitySetLike[]): this {
-        for (let i = 0; i < sets.length; i++) this._any.push(sets[i]);
-        return this;
-    }
-
+export class QueryBuilder extends Query {
     build(): Query {
-        return new Query({
-            all: this._all,
-            none: this._none,
-            any: this._any,
-        });
-    }
-
-    matches(entity: Entity): boolean {
-        return this.build().matches(entity);
-    }
-
-    each(fn: (entity: Entity) => void): void {
-        this.build().each(fn);
-    }
-
-    entities(): Entity[] {
-        return this.build().entities();
-    }
-
-    first(): Entity | undefined {
-        return this.build().first();
-    }
-
-    count(): number {
-        return this.build().count();
-    }
-
-    [Symbol.iterator](): IterableIterator<Entity> {
-        return this.build()[Symbol.iterator]();
+        return this;
     }
 }
 

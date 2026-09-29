@@ -1,4 +1,4 @@
-import { Socket, type SocketOptions } from "./socket.js";
+import { Socket } from "./socket.js";
 import type { ProcessCtx } from "./types.js";
 
 /**
@@ -19,10 +19,10 @@ export abstract class Chip {
     /**
      * Registers an input socket.
      */
-    addInput(socketOrName: Socket | string, options?: string | SocketOptions): this {
+    addInput(socketOrName: Socket | string, dataType?: string, required = true): this {
         let socket: Socket;
         if (typeof socketOrName === "string") {
-            socket = new Socket(socketOrName, "input", options);
+            socket = new Socket(socketOrName, "input", dataType, required);
         } else {
             socket = socketOrName;
         }
@@ -39,7 +39,7 @@ export abstract class Chip {
     addOutput(socketOrName: Socket | string, dataType?: string): this {
         let socket: Socket;
         if (typeof socketOrName === "string") {
-            socket = new Socket(socketOrName, "output", dataType ? { dataType } : {});
+            socket = new Socket(socketOrName, "output", dataType, false);
         } else {
             socket = socketOrName;
         }
@@ -101,10 +101,7 @@ export class ChipProxy extends Chip {
         super(id, sourceChip.name);
         this.sourceChip = sourceChip;
         for (const socket of sourceChip.inputs.values()) {
-            this.addInput(socket.name, {
-                dataType: socket.dataType,
-                required: socket.required,
-            });
+            this.addInput(socket.name, socket.dataType, socket.required);
         }
         for (const socket of sourceChip.outputs.values()) {
             this.addOutput(socket.name, socket.dataType);

@@ -10,7 +10,7 @@ All modules share common engineering invariants: zero-allocation calling convent
 
 | Package | Role | Core Data Structures | Performance & Memory Invariants |
 | :--- | :--- | :--- | :--- |
-| **[`aecs`](./aecs/ReadMe.md)** | Entity Component System | `Entity`, `EntityPool`, `ComponentSet<T>`, `FloatSet`, `QueryBuilder`, `query2`, `query3` | Contiguous packed dense arrays; generational slot recycling; cardinality-driven smallest-set iteration. |
+| **[`aecs`](./aecs/ReadMe.md)** | Entity Component System | `Entity`, `EntityPool`, `ComponentSet<T>`, `FloatSet`, `Query`, `QueryBuilder`, `query2`, `query3` | Contiguous packed dense arrays; generational slot recycling; cardinality-driven smallest-set iteration; zero hot-path allocations. |
 | **[`alm`](./alm/ReadMe.md)** | 3D Linear Algebra & Spatial Math | `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3`, `Mat4`, `Ray`, `Plane`, `AABB`, `Frustum` | Direct subclassing of native `Float32Array`; in-place fluent operations; out-parameter zero-allocation conventions. |
 | **[`atempo`](./atempo/ReadMe.md)** | Temporal Orchestration & Cadence | `Track`, `FloatTrack`, `Vec3Track`, `Curve`, `Clip`, `Cadence`, `FixedCadence`, `Spring`, `Phase`, `Metronome` | Contiguous double-precision timestamps; cached O(1) interval lookup; closed-form 2nd-order analytical spring solvers. |
 | **[`acircuit`](./acircuit/ReadMe.md)** | Directed Computation Circuit | `Socket`, `Wire`, `Chip`, `Circuit`, `Subcircuit` | Kahn topological ordering; execution plan caching (`_cachedPlan`); 1-to-1 input enforcement; 1-to-N output fan-out. |
@@ -30,7 +30,7 @@ High-performance, sets-first ECS decoupled from rigid scene graphs.
 - **Dense Storage Primitives**:
   - `ComponentSet<T>`: Contiguous sparse-dense storage for JavaScript objects, state tags, and reference payloads.
   - `FloatSet`: Contiguous packed `Float32Array` storage for high-frequency numeric vectors and matrices, eliminating object reference overhead.
-- **Cardinality Joins**: `QueryBuilder`, `query2()`, and `query3()` identify the smallest active component set and iterate only across that driver set, testing presence in secondary sets in O(1) time.
+- **Cardinality Joins**: `Query`, `QueryBuilder`, `query2()`, and `query3()` identify smallest active component set and iterate only across that driver set, testing presence in secondary sets in O(1) time with zero hot-path allocations.
 
 ### 2.2 alm: 3D Linear Algebra & Spatial Primitives
 

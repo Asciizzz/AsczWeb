@@ -24,8 +24,8 @@ Acircuit structures computational graphs across five core primitives:
 import { Socket, inSocketKey, wireEquals, type Wire } from "./index.js";
 
 // Endpoint definition with data type and requirement tags
-const inSocket = new Socket("intensity", "input", { dataType: "number", required: true });
-const outSocket = new Socket("result", "output", "number");
+const inSocket = new Socket("intensity", "input", "number", true);
+const outSocket = new Socket("result", "output", "number", false);
 
 // Wire interface
 const wire: Wire = {
@@ -39,7 +39,7 @@ const wire: Wire = {
 const key = inSocketKey("targetChip", "intensity"); // "targetChip:intensity"
 ```
 
-- `Socket(name, direction, options)`: Instantiates endpoint. `direction` enforces `"input"` or `"output"`. Options configure `dataType` (for type compatibility enforcement) and `required` (for static validation).
+- `Socket(name, direction, dataType?, required?)`: Instantiates endpoint. `direction` enforces `"input"` or `"output"`. Positional arguments configure `dataType` (for type compatibility enforcement) and `required` (for static validation).
 - `Wire`: Immutable directed connection describing `{ outChipId, outSocket, inChipId, inSocket }`.
   - Input sockets enforce 1-to-1 wiring; connecting a new wire replaces any pre-existing connection.
   - Output sockets support 1-to-N fan-out to multiple downstream inputs.
@@ -87,7 +87,7 @@ class MultiplyAddChip extends Chip {
 ```
 
 - `Chip(id, name)`: Abstract base constructor registering immutable string identifier and debug name.
-- `addInput(socketOrName, options)` / `addOutput(socketOrName, dataType)`: Registers endpoints with optional type validation tags.
+- `addInput(socketOrName, dataType?, required?)` / `addOutput(socketOrName, dataType?)`: Registers endpoints with optional type validation tags.
 - `canConnectInput(inSocketName, outChip, outSocketName)`: Pre-connection validation gate invoked by `Circuit.connect()`. Verifies type compatibility when data types are declared.
 - `process(inputs, ctx)`: Evaluates chip using resolved input values for the current pass.
 - `ChipProxy`: Transparent proxy chip delegating execution and configuration to a wrapped source chip.
@@ -101,7 +101,7 @@ class MultiplyAddChip extends Chip {
 ```typescript
 import { Circuit } from "./index.js";
 
-const circuit = new Circuit({ label: "AudioSignalPipeline" });
+const circuit = new Circuit("AudioSignalPipeline");
 
 const chipA = new MultiplyAddChip("chipA");
 const chipB = new MultiplyAddChip("chipB");
@@ -161,7 +161,7 @@ const subCircuit = circuit.extractSubgraph(["outputChip"]);
 ```
 
 - `pruneUnreachable(targetChipIds?)`: Keeps target chips (or all sinks if omitted) and their transitive upstream dependencies; removes all non-contributing chips and wires from the circuit.
-- `extractSubgraph(targetChipIds, options?)`: Constructs and returns a new `Circuit` containing only target chips, their transitive upstream dependencies, and interconnecting wires.
+- `extractSubgraph(targetChipIds, label?)`: Constructs and returns a new `Circuit` containing only target chips, their transitive upstream dependencies, and interconnecting wires.
 
 ---
 
@@ -172,14 +172,14 @@ const subCircuit = circuit.extractSubgraph(["outputChip"]);
 ```typescript
 import { Circuit, Subcircuit } from "./index.js";
 
-const inner = new Circuit({ label: "FilterBlock" });
+const inner = new Circuit("FilterBlock");
 // ... populate inner circuit ...
 
 const composite = new Subcircuit("filter1", "AudioFilter", inner);
 composite.mapInput("audioIn", "innerPreAmp", "signal");
 composite.mapOutput("audioOut", "innerPostAmp", "result");
 
-const mainCircuit = new Circuit({ label: "Main" });
+const mainCircuit = new Circuit("Main");
 mainCircuit.addChip(composite);
 
 // Inline/flatten composite into parent circuit
