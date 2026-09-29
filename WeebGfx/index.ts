@@ -64,6 +64,8 @@ export {
     type RenderTarget,
     type RenderOptions,
     type DrawMeshOptions,
+    type BlitOptions,
+    type CreateShaderOptionsWGPU,
 } from "./wgpu/index.js";
 export * from "./wgpu/shadergraph/index.js";
 

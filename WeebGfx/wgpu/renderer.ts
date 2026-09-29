@@ -48,6 +48,19 @@ export interface DrawMeshOptions extends RenderTarget {
     submeshIndex?: number;
 }
 
+/**
+ * Options for executing a screen-space fullscreen blit pass.
+ */
+export interface BlitOptions {
+    pass: GPURenderPassEncoder;
+    shader: ShaderWGPU;
+    /** Optional camera for shaders reconstructing view rays or depth projection. */
+    camera?: Camera;
+    /** Material parameters overriding shader defaults. */
+    params?: ShaderParams;
+    device?: GPUDevice;
+}
+
 const BUFFER_USAGE_UNIFORM_COPY_DST =
     typeof GPUBufferUsage !== "undefined"
         ? GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
@@ -91,6 +104,10 @@ interface ShaderBucketWGPU {
     items: RenderItemWGPU[];
 }
 
+function isCameraLike(obj: unknown): obj is Camera {
+    return Boolean(obj && typeof obj === "object" && "viewProjMatrix" in obj);
+}
+
 /**
  * Submesh draw dispatcher operating within caller-provided render passes.
  * Uses a four-frequency WebGPU bind group layout:
@@ -104,13 +121,9 @@ export class MeshRendererWGPU {
     readonly uniformPool: BufferPool;
     readonly bindTableCache: BindTableCache;
 
-    // Camera uniform buffer and cached bind tables
-    private _cameraBuffer?: Buffer;
-    private _lastCameraData = new Float32Array(52);
-    private _cameraInitialized = false;
-
-    // Instance transform storage buffer & CPU staging array
+    // Instance transform storage buffer & running multi-pass offset
     private _instanceBuffer?: Buffer;
+    private _instanceByteOffset = 0;
     private _instanceStaging = new Float32Array(1024 * 64);
 
     // Reusable pass bucket pools and offset cache
@@ -137,10 +150,11 @@ export class MeshRendererWGPU {
     }
 
     /**
-     * Resets uniform buffer pool allocations at start of frame.
+     * Resets uniform buffer pool allocations and instance offsets at start of frame.
      */
     reset(): void {
         this.uniformPool.reset();
+        this._instanceByteOffset = 0;
     }
 
     /**
@@ -220,8 +234,16 @@ export class MeshRendererWGPU {
             actors = (cameraOrActors as Iterable<Actor> | undefined) ?? options.actors ?? this._queue;
         } else {
             pass = passOrTarget as GPURenderPassEncoder;
-            cam = cameraOrActors as Camera;
-            actors = actorsArg ?? this._queue;
+            if (isCameraLike(cameraOrActors)) {
+                cam = cameraOrActors;
+                actors = (actorsArg as Iterable<Actor>) ?? this._queue;
+            } else if (isCameraLike(actorsArg)) {
+                cam = actorsArg;
+                actors = (cameraOrActors as Iterable<Actor>) ?? this._queue;
+            } else {
+                cam = cameraOrActors as unknown as Camera;
+                actors = (actorsArg as Iterable<Actor>) ?? this._queue;
+            }
         }
 
         const device = ("device" in passOrTarget && passOrTarget.device) ? passOrTarget.device : this.device;
@@ -258,23 +280,26 @@ export class MeshRendererWGPU {
 
         // 2. Compute 256-byte aligned dynamic offsets for each actor
         this._actorOffsetMap.clear();
-        let totalBytes = 0;
+        let passTotalBytes = 0;
         for (let i = 0; i < count; i++) {
             const actor = activeActors[i];
-            this._actorOffsetMap.set(actor, totalBytes);
+            this._actorOffsetMap.set(actor, passTotalBytes);
             const instCount = Math.max(1, actor.instances.count);
             const bytesNeeded = instCount * 128; // 32 floats = 128 bytes per instance
-            totalBytes += Math.ceil(bytesNeeded / 256) * 256;
+            passTotalBytes += Math.ceil(bytesNeeded / 256) * 256;
         }
 
-        const totalFloats = totalBytes / 4;
-        if (this._instanceStaging.length < totalFloats) {
-            this._instanceStaging = new Float32Array(Math.max(totalFloats, this._instanceStaging.length * 2));
+        const passTotalFloats = passTotalBytes / 4;
+        if (this._instanceStaging.length < passTotalFloats) {
+            this._instanceStaging = new Float32Array(Math.max(passTotalFloats, this._instanceStaging.length * 2));
         }
 
-        if (!this._instanceBuffer || this._instanceBuffer.size < totalBytes) {
+        const passBaseByteOffset = this._instanceByteOffset;
+        const requiredBufferSize = passBaseByteOffset + passTotalBytes;
+
+        if (!this._instanceBuffer || this._instanceBuffer.size < requiredBufferSize) {
             this._instanceBuffer?.destroy();
-            const allocSize = Math.max(totalBytes, 65536);
+            const allocSize = Math.max(requiredBufferSize, 1048576);
             this._instanceBuffer = Buffer.create(device, {
                 size: allocSize,
                 usage: BUFFER_USAGE_STORAGE_COPY_DST,
@@ -311,11 +336,13 @@ export class MeshRendererWGPU {
             }
         }
 
-        // Upload packed instances in single transfer
-        this._instanceBuffer.write(device, this._instanceStaging.subarray(0, totalFloats), 0);
+        // Upload packed instances in single transfer for this pass
+        this._instanceBuffer.write(device, this._instanceStaging.subarray(0, passTotalFloats), passBaseByteOffset);
+        this._instanceByteOffset += passTotalBytes;
 
-        // 4. Update pass camera buffer once
-        this._updateCameraBuffer(device, cam);
+        // 4. Acquire pass camera uniform buffer from pool
+        const cameraBuffer = this.uniformPool.acquire(device, 256);
+        cameraBuffer.write(device, cam.getUniformData(), 0);
 
         // 5. Populate shader pass buckets
         for (let b = 0; b < this._bucketList.length; b++) {
@@ -399,7 +426,7 @@ export class MeshRendererWGPU {
                 // Slot 0: Camera (PerFrame)
                 if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
                     if (!lastBoundCameraTable) {
-                        const cameraTable = this._getCameraBindTable(device, shader);
+                        const cameraTable = this._getCameraBindTable(device, shader, cameraBuffer);
                         if (cameraTable) {
                             pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
                             lastBoundCameraTable = cameraTable;
@@ -441,7 +468,7 @@ export class MeshRendererWGPU {
                             pass.setBindGroup(
                                 shader.meta.instanceGroupIndex ?? 2,
                                 instanceTable.native,
-                                [item.dynamicOffset]
+                                [passBaseByteOffset + item.dynamicOffset]
                             );
                         }
                     }
@@ -507,6 +534,50 @@ export class MeshRendererWGPU {
     }
 
     /**
+     * Executes a screen-space fullscreen blit pass with 3 procedural vertices.
+     * Binds material parameters and textures (Slot 1) without requiring vertex buffers.
+     */
+    blit(options: BlitOptions): void {
+        const pass = options.pass;
+        const shader = options.shader;
+        const device = options.device ?? this.device;
+
+        if (!pass) throw new Error("[MeshRendererWGPU.blit] Render pass was not provided.");
+        if (!shader) throw new Error("[MeshRendererWGPU.blit] Shader was not provided.");
+        if (!device) throw new Error("[MeshRendererWGPU.blit] GPUDevice was not provided.");
+
+        pass.setPipeline(shader.pipeline.native);
+
+        // Optional Camera Uniforms (Slot 0)
+        if (options.camera && shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
+            const cameraBuffer = this.uniformPool.acquire(device, 256);
+            cameraBuffer.write(device, options.camera.getUniformData(), 0);
+            const cameraTable = this._getCameraBindTable(device, shader, cameraBuffer);
+            if (cameraTable) {
+                pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
+            }
+        }
+
+        // Material Parameters & Textures (Slot 1)
+        const materialGroupIdx = shader.meta.materialGroupIndex ?? 1;
+        if (shader.bindGroupLayouts.length > materialGroupIdx) {
+            const mergedParams: ShaderParams = {
+                floats: { ...shader.defaultParams.floats, ...options.params?.floats },
+                vectors: { ...shader.defaultParams.vectors, ...options.params?.vectors },
+                textures: { ...shader.defaultParams.textures, ...options.params?.textures },
+                samplers: { ...shader.defaultParams.samplers, ...options.params?.samplers },
+            };
+            const materialTable = this._getMaterialBindTable(device, shader, mergedParams);
+            if (materialTable) {
+                pass.setBindGroup(materialGroupIdx, materialTable.native);
+            }
+        }
+
+        // Draw 3 vertices for procedural fullscreen triangle
+        pass.draw(3, 1, 0, 0);
+    }
+
+    /**
      * Draws single mesh with shader inside render pass.
      */
     drawMesh(options: DrawMeshOptions): void {
@@ -544,9 +615,10 @@ export class MeshRendererWGPU {
             if (legacyGroup0) pass.setBindGroup(0, legacyGroup0);
         } else {
             // Camera (Slot 0)
-            this._updateCameraBuffer(device, camera);
             if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
-                const cameraTable = this._getCameraBindTable(device, shader);
+                const cameraBuffer = this.uniformPool.acquire(device, 256);
+                cameraBuffer.write(device, camera.getUniformData(), 0);
+                const cameraTable = this._getCameraBindTable(device, shader, cameraBuffer);
                 if (cameraTable) {
                     pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
                 }
@@ -554,10 +626,15 @@ export class MeshRendererWGPU {
 
             // Instance Transform (Slot 2)
             if (shader.meta.hasTransform && shader.bindGroupLayouts.length > 2) {
-                if (!this._instanceBuffer || this._instanceBuffer.size < 256) {
+                const bytesNeeded = 256;
+                const passBaseByteOffset = this._instanceByteOffset;
+                const requiredBufferSize = passBaseByteOffset + bytesNeeded;
+
+                if (!this._instanceBuffer || this._instanceBuffer.size < requiredBufferSize) {
                     this._instanceBuffer?.destroy();
+                    const allocSize = Math.max(requiredBufferSize, 1048576);
                     this._instanceBuffer = Buffer.create(device, {
-                        size: 65536,
+                        size: allocSize,
                         usage: BUFFER_USAGE_STORAGE_COPY_DST,
                         label: "MeshRenderer_InstanceStorageBuffer",
                     });
@@ -567,12 +644,13 @@ export class MeshRendererWGPU {
                 const normal = (options.normalMatrix as Float32Array) ?? world;
                 this._instanceStaging.set(world, 0);
                 this._instanceStaging.set(normal, 16);
-                this._instanceBuffer.write(device, this._instanceStaging.subarray(0, 32), 0);
+                this._instanceBuffer.write(device, this._instanceStaging.subarray(0, 32), passBaseByteOffset);
 
                 const instanceTable = this._getInstanceBindTable(device, shader);
                 if (instanceTable) {
-                    pass.setBindGroup(shader.meta.instanceGroupIndex ?? 2, instanceTable.native, [0]);
+                    pass.setBindGroup(shader.meta.instanceGroupIndex ?? 2, instanceTable.native, [passBaseByteOffset]);
                 }
+                this._instanceByteOffset += bytesNeeded;
             }
         }
 
@@ -612,38 +690,19 @@ export class MeshRendererWGPU {
         }
     }
 
-    private _updateCameraBuffer(device: GPUDevice, camera: Camera): void {
-        if (!this._cameraBuffer) {
-            this._cameraBuffer = Buffer.createUniform(device, 256, "MeshRenderer_CameraBuffer");
-        }
-
-        const data = camera.getUniformData();
-        let changed = !this._cameraInitialized;
-        if (!changed) {
-            for (let i = 0; i < 52; i++) {
-                if (data[i] !== this._lastCameraData[i]) {
-                    changed = true;
-                    break;
-                }
-            }
-        }
-
-        if (changed) {
-            this._cameraBuffer.write(device, data, 0);
-            this._lastCameraData.set(data);
-            this._cameraInitialized = true;
-        }
-    }
-
-    private _getCameraBindTable(device: GPUDevice, shader: ShaderWGPU): BindTable | null {
+    private _getCameraBindTable(
+        device: GPUDevice,
+        shader: ShaderWGPU,
+        cameraBuffer: Buffer
+    ): BindTable | null {
         const layout = shader.bindGroupLayouts[shader.meta.cameraGroupIndex ?? 0];
-        if (!layout || !this._cameraBuffer) return null;
+        if (!layout || !cameraBuffer) return null;
 
         const entries: BindingEntry[] = [
             {
                 binding: 0,
                 resource: {
-                    buffer: this._cameraBuffer.native,
+                    buffer: cameraBuffer.native,
                     offset: 0,
                     size: 208,
                 },
@@ -848,7 +907,6 @@ export class MeshRendererWGPU {
     }
 
     destroy(): void {
-        this._cameraBuffer?.destroy();
         this._instanceBuffer?.destroy();
         this._fallbackTexture?.destroy();
         this.uniformPool.destroy();

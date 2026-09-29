@@ -34,7 +34,9 @@
   "include": [
     "Atoolkit/**/*.ts",
     "WeebGfx/**/*.ts",
-    "tests/ModelStudio/**/*.ts"
+    "tests/ModelStudio/**/*.ts",
+    "tests/Backrooms/**/*.ts",
+    "tests/Minimal/**/*.ts"
   ],
   "exclude": [
     "node_modules",

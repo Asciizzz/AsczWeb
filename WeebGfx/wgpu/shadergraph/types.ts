@@ -14,7 +14,9 @@ export type WgslDataType =
     | "vec4<i32>"
     | "bool"
     | "texture_2d<f32>"
+    | "texture_depth_2d"
     | "sampler"
+    | "sampler_comparison"
     | "layout_token";
 
 export interface Socket {

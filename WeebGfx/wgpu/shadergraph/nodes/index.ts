@@ -3,6 +3,7 @@ export {
     InputVertexNode,
     OutputVertexNode,
     OutputFragmentNode,
+    FullscreenTriangleNode,
 } from "./io.js";
 
 export {
@@ -22,6 +23,7 @@ export {
     TextureNode,
     SamplerNode,
     SampleTextureNode,
+    SampleTextureCompareNode,
     TextureFetchNode,
 } from "./texture.js";
 

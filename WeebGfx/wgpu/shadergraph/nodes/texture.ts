@@ -12,6 +12,7 @@ export class TextureNode implements Node {
     isParam: boolean;
     paramName: string;
     defaultValue?: TextureGPU;
+    isDepth: boolean;
 
     inputs: Socket[] = [];
     outputs: Socket[];
@@ -20,14 +21,21 @@ export class TextureNode implements Node {
         id: string,
         defaultValue?: TextureGPU,
         paramName?: string,
-        isParam = true
+        isParam = true,
+        isDepth = false
     ) {
         this.id = id;
         this.defaultValue = defaultValue;
         this.isParam = isParam;
         this.paramName = paramName ?? (isParam ? id : undefined) ?? id;
+        this.isDepth = isDepth;
         this.outputs = [
-            { id: "texture", name: "texture", dataType: "texture_2d<f32>", isInput: false },
+            {
+                id: "texture",
+                name: "texture",
+                dataType: isDepth ? "texture_depth_2d" : "texture_2d<f32>",
+                isInput: false,
+            },
         ];
     }
 }
@@ -43,6 +51,7 @@ export class SamplerNode implements Node {
     isParam: boolean;
     paramName: string;
     defaultValue?: GPUSampler | GPUSamplerDescriptor;
+    isComparison: boolean;
 
     inputs: Socket[] = [];
     outputs: Socket[];
@@ -51,14 +60,21 @@ export class SamplerNode implements Node {
         id: string,
         defaultValue?: GPUSampler | GPUSamplerDescriptor,
         paramName?: string,
-        isParam = true
+        isParam = true,
+        isComparison = false
     ) {
         this.id = id;
         this.defaultValue = defaultValue;
         this.isParam = isParam;
         this.paramName = paramName ?? (isParam ? id : undefined) ?? id;
+        this.isComparison = isComparison;
         this.outputs = [
-            { id: "sampler", name: "sampler", dataType: "sampler", isInput: false },
+            {
+                id: "sampler",
+                name: "sampler",
+                dataType: isComparison ? "sampler_comparison" : "sampler",
+                isInput: false,
+            },
         ];
     }
 }
@@ -102,6 +118,30 @@ export class TextureFetchNode implements Node {
         ];
         this.outputs = [
             { id: "color", name: "color", dataType: "vec4<f32>", isInput: false },
+        ];
+    }
+}
+
+/**
+ * Samples a depth texture using a comparison sampler.
+ * Executes textureSampleCompare(texture, sampler, uv, depthRef) returning a 0.0-1.0 visibility factor.
+ */
+export class SampleTextureCompareNode implements Node {
+    id: string;
+    type = "SampleTextureCompare";
+    inputs: Socket[];
+    outputs: Socket[];
+
+    constructor(id: string) {
+        this.id = id;
+        this.inputs = [
+            { id: "texture", name: "texture", dataType: "texture_depth_2d", isInput: true },
+            { id: "sampler", name: "sampler", dataType: "sampler_comparison", isInput: true },
+            { id: "uv", name: "uv", dataType: "vec2<f32>", isInput: true },
+            { id: "depthRef", name: "depthRef", dataType: "f32", isInput: true },
+        ];
+        this.outputs = [
+            { id: "shadow", name: "shadow", dataType: "f32", isInput: false },
         ];
     }
 }

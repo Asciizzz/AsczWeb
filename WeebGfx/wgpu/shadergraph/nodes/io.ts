@@ -109,3 +109,23 @@ export class OutputFragmentNode implements Node {
         ];
     }
 }
+
+/**
+ * Procedural fullscreen triangle generator for post-processing and blit passes.
+ * Emits full clip position and [0, 1] normalized UV without vertex buffer allocation.
+ */
+export class FullscreenTriangleNode implements Node {
+    id: string;
+    type = "FullscreenTriangle";
+    stage: "vertex" = "vertex";
+    inputs: Socket[] = [];
+    outputs: Socket[];
+
+    constructor(id = "fullscreen_triangle") {
+        this.id = id;
+        this.outputs = [
+            { id: "clipPosition", name: "clipPosition", dataType: "vec4<f32>", isInput: false },
+            { id: "uv", name: "uv", dataType: "vec2<f32>", isInput: false },
+        ];
+    }
+}
