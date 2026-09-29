@@ -53,13 +53,6 @@ export class ComponentSet<T> implements Iterable<[Entity, T]> {
         return val;
     }
 
-    /**
-     * Ensures component exists for entity. If absent, sets initial value.
-     */
-    ensure(entity: Entity, value: T): T {
-        return this.getOrAdd(entity, value);
-    }
-
     delete(entity: Entity): boolean {
         const slot = entityIndex(entity);
         const denseIdx = this.sparse[slot];

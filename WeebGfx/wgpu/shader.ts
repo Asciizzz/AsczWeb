@@ -26,11 +26,6 @@ export interface ShaderGroupMetaWGPU {
     hasTransform: boolean;
     hasSkin: boolean;
     hasFragment?: boolean;
-
-    /** Backward compatibility alias for instanceGroupIndex. */
-    entityGroupIndex?: number;
-    /** Backward compatibility alias for hasTransform. */
-    hasEntityTransform?: boolean;
 }
 
 /**
@@ -96,19 +91,17 @@ export class ShaderWGPU extends ShaderGPU {
         this.bindLayouts = bindLayouts;
         this.pipelineConfig = pipelineConfig;
 
-        const instanceGroupIndex = meta?.instanceGroupIndex ?? meta?.entityGroupIndex ?? 2;
-        const hasTransform = meta?.hasTransform ?? meta?.hasEntityTransform ?? (wgslCode.includes("u_instances") || wgslCode.includes("InstanceData") || wgslCode.includes("u_entity") || wgslCode.includes("EntityUniforms"));
+        const instanceGroupIndex = meta?.instanceGroupIndex ?? 2;
+        const hasTransform = meta?.hasTransform ?? (wgslCode.includes("u_instances") || wgslCode.includes("InstanceData"));
 
         this.meta = {
             hasCamera: meta?.hasCamera ?? (wgslCode.includes("u_camera") || wgslCode.includes("CameraUniforms")),
             hasMaterial: meta?.hasMaterial ?? (wgslCode.includes("u_material") || (paramBindings && (paramBindings.hasMaterialUniform || paramBindings.textures.length > 0 || paramBindings.samplers.length > 0)) || false),
             hasTransform,
-            hasEntityTransform: hasTransform,
             hasSkin: meta?.hasSkin ?? (wgslCode.includes("u_skin") || wgslCode.includes("SkinUniforms")),
             cameraGroupIndex: meta?.cameraGroupIndex ?? 0,
             materialGroupIndex: meta?.materialGroupIndex ?? 1,
             instanceGroupIndex,
-            entityGroupIndex: instanceGroupIndex,
             skinGroupIndex: meta?.skinGroupIndex ?? 3,
         };
     }
@@ -117,13 +110,6 @@ export class ShaderWGPU extends ShaderGPU {
      * Returns the native GPURenderPipeline handle.
      */
     get native(): GPURenderPipeline {
-        return this.pipeline.native;
-    }
-
-    /**
-     * Compatibility alias returning the native GPURenderPipeline handle.
-     */
-    get gpuPipeline(): GPURenderPipeline {
         return this.pipeline.native;
     }
 
@@ -140,7 +126,7 @@ export class ShaderWGPU extends ShaderGPU {
         const meta = options.meta;
 
         const hasCamera = meta?.hasCamera ?? (code.includes("u_camera") || code.includes("CameraUniforms"));
-        const hasTransform = meta?.hasTransform ?? meta?.hasEntityTransform ?? (code.includes("u_instances") || code.includes("InstanceData"));
+        const hasTransform = meta?.hasTransform ?? (code.includes("u_instances") || code.includes("InstanceData"));
         const hasSkin = meta?.hasSkin ?? (code.includes("u_skin") || code.includes("SkinUniforms"));
         const hasMaterial = meta?.hasMaterial ?? (code.includes("u_material") || (paramBindings && (paramBindings.hasMaterialUniform || paramBindings.textures.length > 0 || paramBindings.samplers.length > 0)) || false);
 
@@ -272,7 +258,6 @@ export class ShaderWGPU extends ShaderGPU {
                 cameraGroupIndex: 0,
                 materialGroupIndex: 1,
                 instanceGroupIndex: 2,
-                entityGroupIndex: 2,
                 skinGroupIndex: 3,
                 ...meta,
             },

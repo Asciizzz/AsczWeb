@@ -59,7 +59,6 @@ export {
     TextureWGPU,
     ShaderWGPU,
     MeshRendererWGPU,
-    RendererWGPU,
     ShaderGraphWGPU,
     type RenderTarget,
     type RenderOptions,

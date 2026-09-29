@@ -74,10 +74,6 @@ export class _Quat extends Float32Array {
         return out;
     }
 
-    static makeIdentity(out?: _Quat): _Quat {
-        return _Quat.identity(out);
-    }
-
     static view(buffer: ArrayBufferLike, byteOffset = 0): _Quat {
         return new _Quat(buffer, byteOffset);
     }

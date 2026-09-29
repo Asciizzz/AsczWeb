@@ -15,13 +15,6 @@ export class MeshWGPU extends MeshGPU {
     }
 
     /**
-     * Compatibility alias returning the native GPUBuffer of the vertex buffer.
-     */
-    get gpuBuffer(): GPUBuffer {
-        return this.vertexBuffer.native;
-    }
-
-    /**
      * Returns underlying native GPUBuffer for vertex buffer.
      */
     get nativeVertexBuffer(): GPUBuffer {

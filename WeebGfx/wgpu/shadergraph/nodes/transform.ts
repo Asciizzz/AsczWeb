@@ -24,8 +24,6 @@ export class WorldTransformNode implements Node {
     }
 }
 
-/** Backward compatibility alias for WorldTransformNode. */
-export const EntityTransformNode = WorldTransformNode;
 
 /**
  * Transforms vertex position and normal using weighted skeletal joint matrices.

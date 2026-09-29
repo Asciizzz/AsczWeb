@@ -6,7 +6,6 @@ export {
     OutputFragmentNode,
     FullscreenTriangleNode,
     WorldTransformNode,
-    EntityTransformNode,
     SkinTransformNode,
     FloatNode,
     Vec2Node,

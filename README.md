@@ -2,7 +2,7 @@
 
 TypeScript computational toolkit and WebGPU graphics architecture providing cache-coherent sparse-set ECS, allocation-free 3D math, value computation circuits, temporal cadence evaluation, and domain-agnostic GPU execution.
 
-Repository centers on `Atoolkit` as foundational computational layer, `WeebGfx` as high-level graphics framework, and `archive/` for preserved legacy implementations.
+Repository centers on `Atoolkit` as foundational computational layer, `WeebGfx` as high-level graphics framework.
 
 ---
 

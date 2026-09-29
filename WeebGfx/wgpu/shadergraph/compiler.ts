@@ -24,7 +24,6 @@ import {
     OutputFragmentNode,
     FullscreenTriangleNode,
     WorldTransformNode,
-    EntityTransformNode,
     SkinTransformNode,
     SampleTextureNode,
     SampleTextureCompareNode,
@@ -339,8 +338,7 @@ export class ShaderGraphWGPU {
         }
 
         const hasSkin = Array.from(this.nodes.values()).some((n) => n.type === "SkinTransform");
-        const hasTransform = hasSkin || Array.from(this.nodes.values()).some((n) => n.type === "WorldTransform" || n.type === "EntityTransform");
-        const hasEntityTransform = hasTransform;
+        const hasTransform = hasSkin || Array.from(this.nodes.values()).some((n) => n.type === "WorldTransform");
         const hasCamera = Array.from(this.nodes.values()).some(
             (n) => n instanceof CameraNode || n instanceof UniformMatrixNode
         );
@@ -804,13 +802,11 @@ export class ShaderGraphWGPU {
             hasCamera,
             hasMaterial: hasMaterialUniform || paramTextures.length > 0 || paramSamplers.length > 0,
             hasTransform,
-            hasEntityTransform: hasTransform,
             hasSkin,
             hasFragment: !!outputFragNode,
             cameraGroupIndex: 0,
             materialGroupIndex: 1,
             instanceGroupIndex: 2,
-            entityGroupIndex: 2,
             skinGroupIndex: 3,
         };
 

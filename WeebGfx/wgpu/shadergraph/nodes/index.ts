@@ -8,7 +8,6 @@ export {
 
 export {
     WorldTransformNode,
-    EntityTransformNode,
     SkinTransformNode,
 } from "./transform.js";
 

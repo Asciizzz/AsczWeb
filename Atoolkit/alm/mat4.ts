@@ -60,10 +60,6 @@ export class _Mat4 extends Float32Array {
         return out;
     }
 
-    static makeIdentity(out?: _Mat4): _Mat4 {
-        return _Mat4.identity(out);
-    }
-
     static view(buffer: ArrayBufferLike, byteOffset = 0): _Mat4 {
         return new _Mat4(buffer, byteOffset);
     }

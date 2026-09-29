@@ -193,7 +193,6 @@ const worldTx = new WorldTransformNode(id);
   - `out_position`: World-space vertex position (`vec3<f32>`).
   - `out_normal`: Normalized world-space normal (`vec3<f32>`).
 
-`EntityTransformNode` is an alias for `WorldTransformNode`.
 
 #### `SkinTransformNode`
 

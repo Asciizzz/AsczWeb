@@ -706,7 +706,7 @@ import {
     RenderPassNode,
     Target,
     SlotFrequency,
-} from "Atoolkit/awgpu_new";
+} from "@asciiz/atoolkit/awgpu";
 
 // 1. Initialize Device & Presentation Target
 const gfx = await Device.create({ canvas: "#renderCanvas" });
@@ -766,7 +766,7 @@ import {
     ComputePipeline,
     ComputePassNode,
     PassSequence,
-} from "Atoolkit/awgpu_new";
+} from "@asciiz/atoolkit/awgpu";
 
 const gfx = await Device.createHeadless();
 
@@ -817,7 +817,7 @@ sequence.execute(gfx);
 Demonstrates mixing Level 5 batch orchestration with raw WebGPU native encoding in the same pass. `addDraw()` and `record()` are mutually exclusive per pass: use `addDraw()` for batched state-deduplicated draws, or `record()` for full imperative control.
 
 ```typescript
-import { Target, RenderPassNode } from "Atoolkit/awgpu_new";
+import { Target, RenderPassNode } from "@asciiz/atoolkit/awgpu";
 
 // Batched draws via addDraw():
 const batchPass = new RenderPassNode(screenTarget);
@@ -850,7 +850,7 @@ import {
     RasterPipeline,
     RenderPassNode,
     Target,
-} from "Atoolkit/awgpu_new";
+} from "@asciiz/atoolkit/awgpu";
 
 const gfx = await Device.create({ canvas: "#renderCanvas" });
 const rawDevice = gfx.native; // Raw GPUDevice

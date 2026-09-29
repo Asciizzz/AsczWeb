@@ -420,17 +420,13 @@ export class MeshRendererWGPU {
                 lastBoundCameraTable = undefined;
             }
 
-            const isLegacyLayout = (shader.meta.instanceGroupIndex ?? shader.meta.entityGroupIndex) === shader.meta.cameraGroupIndex;
-
-            if (!isLegacyLayout) {
-                // Slot 0: Camera (PerFrame)
-                if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
-                    if (!lastBoundCameraTable) {
-                        const cameraTable = this._getCameraBindTable(device, shader, cameraBuffer);
-                        if (cameraTable) {
-                            pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
-                            lastBoundCameraTable = cameraTable;
-                        }
+            // Slot 0: Camera (PerFrame)
+            if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
+                if (!lastBoundCameraTable) {
+                    const cameraTable = this._getCameraBindTable(device, shader, cameraBuffer);
+                    if (cameraTable) {
+                        pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
+                        lastBoundCameraTable = cameraTable;
                     }
                 }
             }
@@ -451,26 +447,15 @@ export class MeshRendererWGPU {
                     lastBoundMesh = mesh;
                 }
 
-                if (isLegacyLayout) {
-                    const legacyGroup0 = this._createLegacyGroup0(
-                        device,
-                        shader,
-                        cam,
-                        actor.transform,
-                        actor.normalMatrix
-                    );
-                    if (legacyGroup0) pass.setBindGroup(0, legacyGroup0);
-                } else {
-                    // Slot 2: Instance Transform Storage Buffer (PerInstance dynamic offset)
-                    if (shader.meta.hasTransform && shader.bindGroupLayouts.length > 2) {
-                        const instanceTable = this._getInstanceBindTable(device, shader);
-                        if (instanceTable) {
-                            pass.setBindGroup(
-                                shader.meta.instanceGroupIndex ?? 2,
-                                instanceTable.native,
-                                [passBaseByteOffset + item.dynamicOffset]
-                            );
-                        }
+                // Slot 2: Instance Transform Storage Buffer (PerInstance dynamic offset)
+                if (shader.meta.hasTransform && shader.bindGroupLayouts.length > 2) {
+                    const instanceTable = this._getInstanceBindTable(device, shader);
+                    if (instanceTable) {
+                        pass.setBindGroup(
+                            shader.meta.instanceGroupIndex ?? 2,
+                            instanceTable.native,
+                            [passBaseByteOffset + item.dynamicOffset]
+                        );
                     }
                 }
 
@@ -602,56 +587,43 @@ export class MeshRendererWGPU {
 
         pass.setPipeline(shader.pipeline.native);
 
-        const isLegacyLayout = (shader.meta.instanceGroupIndex ?? shader.meta.entityGroupIndex) === shader.meta.cameraGroupIndex;
+        // Camera (Slot 0)
+        if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
+            const cameraBuffer = this.uniformPool.acquire(device, 256);
+            cameraBuffer.write(device, camera.getUniformData(), 0);
+            const cameraTable = this._getCameraBindTable(device, shader, cameraBuffer);
+            if (cameraTable) {
+                pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
+            }
+        }
 
-        if (isLegacyLayout) {
-            const legacyGroup0 = this._createLegacyGroup0(
-                device,
-                shader,
-                camera,
-                options.worldMatrix,
-                options.normalMatrix
-            );
-            if (legacyGroup0) pass.setBindGroup(0, legacyGroup0);
-        } else {
-            // Camera (Slot 0)
-            if (shader.meta.hasCamera && shader.bindGroupLayouts.length > 0) {
-                const cameraBuffer = this.uniformPool.acquire(device, 256);
-                cameraBuffer.write(device, camera.getUniformData(), 0);
-                const cameraTable = this._getCameraBindTable(device, shader, cameraBuffer);
-                if (cameraTable) {
-                    pass.setBindGroup(shader.meta.cameraGroupIndex ?? 0, cameraTable.native);
-                }
+        // Instance Transform (Slot 2)
+        if (shader.meta.hasTransform && shader.bindGroupLayouts.length > 2) {
+            const bytesNeeded = 256;
+            const passBaseByteOffset = this._instanceByteOffset;
+            const requiredBufferSize = passBaseByteOffset + bytesNeeded;
+
+            if (!this._instanceBuffer || this._instanceBuffer.size < requiredBufferSize) {
+                this._instanceBuffer?.destroy();
+                const allocSize = Math.max(requiredBufferSize, 1048576);
+                this._instanceBuffer = Buffer.create(device, {
+                    size: allocSize,
+                    usage: BUFFER_USAGE_STORAGE_COPY_DST,
+                    label: "MeshRenderer_InstanceStorageBuffer",
+                });
             }
 
-            // Instance Transform (Slot 2)
-            if (shader.meta.hasTransform && shader.bindGroupLayouts.length > 2) {
-                const bytesNeeded = 256;
-                const passBaseByteOffset = this._instanceByteOffset;
-                const requiredBufferSize = passBaseByteOffset + bytesNeeded;
+            const world = (options.worldMatrix as Float32Array) ?? IDENTITY_MAT4;
+            const normal = (options.normalMatrix as Float32Array) ?? world;
+            this._instanceStaging.set(world, 0);
+            this._instanceStaging.set(normal, 16);
+            this._instanceBuffer.write(device, this._instanceStaging.subarray(0, 32), passBaseByteOffset);
 
-                if (!this._instanceBuffer || this._instanceBuffer.size < requiredBufferSize) {
-                    this._instanceBuffer?.destroy();
-                    const allocSize = Math.max(requiredBufferSize, 1048576);
-                    this._instanceBuffer = Buffer.create(device, {
-                        size: allocSize,
-                        usage: BUFFER_USAGE_STORAGE_COPY_DST,
-                        label: "MeshRenderer_InstanceStorageBuffer",
-                    });
-                }
-
-                const world = (options.worldMatrix as Float32Array) ?? IDENTITY_MAT4;
-                const normal = (options.normalMatrix as Float32Array) ?? world;
-                this._instanceStaging.set(world, 0);
-                this._instanceStaging.set(normal, 16);
-                this._instanceBuffer.write(device, this._instanceStaging.subarray(0, 32), passBaseByteOffset);
-
-                const instanceTable = this._getInstanceBindTable(device, shader);
-                if (instanceTable) {
-                    pass.setBindGroup(shader.meta.instanceGroupIndex ?? 2, instanceTable.native, [passBaseByteOffset]);
-                }
-                this._instanceByteOffset += bytesNeeded;
+            const instanceTable = this._getInstanceBindTable(device, shader);
+            if (instanceTable) {
+                pass.setBindGroup(shader.meta.instanceGroupIndex ?? 2, instanceTable.native, [passBaseByteOffset]);
             }
+            this._instanceByteOffset += bytesNeeded;
         }
 
         // Material Parameters (Slot 1)
@@ -716,7 +688,7 @@ export class MeshRendererWGPU {
     }
 
     private _getInstanceBindTable(device: GPUDevice, shader: ShaderWGPU): BindTable | null {
-        const instanceGroupIdx = shader.meta.instanceGroupIndex ?? shader.meta.entityGroupIndex ?? 2;
+        const instanceGroupIdx = shader.meta.instanceGroupIndex ?? 2;
         const layout = shader.bindGroupLayouts[instanceGroupIdx];
         if (!layout || !this._instanceBuffer) return null;
 
@@ -851,61 +823,6 @@ export class MeshRendererWGPU {
         );
     }
 
-    /**
-     * Fallback creation for combined 2-group shaders binding transform and camera in Group 0.
-     */
-    private _createLegacyGroup0(
-        device: GPUDevice,
-        shader: ShaderWGPU,
-        camera: Camera,
-        worldMatrix?: Float32Array | ArrayLike<number>,
-        normalMatrixOverride?: Float32Array | ArrayLike<number>
-    ): GPUBindGroup | null {
-        const layout = shader.bindGroupLayouts[0];
-        if (!layout) return null;
-
-        const entries: GPUBindGroupEntry[] = [];
-        let bindingIndex = 0;
-
-        // Model & Normal matrices (128 bytes total: 2 x 64 bytes)
-        const transformBytes = 128;
-        const transformBuf = this.uniformPool.acquire(device, transformBytes);
-        const transformData = new Float32Array(32);
-
-        if (worldMatrix) {
-            transformData.set(worldMatrix as ArrayLike<number>, 0);
-            if (normalMatrixOverride) {
-                transformData.set(normalMatrixOverride as ArrayLike<number>, 16);
-            } else {
-                transformData.set(worldMatrix as ArrayLike<number>, 16);
-            }
-        } else {
-            transformData.set(IDENTITY_MAT4, 0);
-            transformData.set(IDENTITY_MAT4, 16);
-        }
-        transformBuf.write(device, transformData);
-
-        entries.push({
-            binding: bindingIndex++,
-            resource: { buffer: transformBuf.native, offset: 0, size: transformBytes },
-        });
-
-        // Camera Uniforms (208 bytes)
-        const cameraBytes = 208;
-        const cameraBuf = this.uniformPool.acquire(device, cameraBytes);
-        cameraBuf.write(device, camera.getUniformData());
-        entries.push({
-            binding: bindingIndex++,
-            resource: { buffer: cameraBuf.native, offset: 0, size: cameraBytes },
-        });
-
-        return device.createBindGroup({
-            label: "WeebGfx_Combined_Group0",
-            layout,
-            entries,
-        });
-    }
-
     destroy(): void {
         this._instanceBuffer?.destroy();
         this._fallbackTexture?.destroy();
@@ -914,7 +831,3 @@ export class MeshRendererWGPU {
         this.clearQueue();
     }
 }
-
-export {
-    MeshRendererWGPU as RendererWGPU,
-};

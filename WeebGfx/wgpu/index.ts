@@ -9,7 +9,6 @@ export {
 } from "./shader.js";
 export {
     MeshRendererWGPU,
-    RendererWGPU,
     type RenderTarget,
     type RenderOptions,
     type DrawMeshOptions,

@@ -192,4 +192,4 @@ query3(transforms, positions, velocities, (entity, transform, pos, vel) => {
 
 - `query2(setA, setB, fn)`: Drives loop from whichever set has lower element count.
 - `query3(setA, setB, setC, fn)`: Drives loop from whichever of the three sets has lowest element count.
-- Aliases `join2` and `join3` remain available for backward compatibility.
+
