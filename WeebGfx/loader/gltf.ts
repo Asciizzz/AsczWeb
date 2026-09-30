@@ -1,4 +1,4 @@
-import { Mat4 } from "@asciiz/atoolkit/alm/index.js";
+import { Mat4 } from "@asciiz/atoolkit/alm";
 import { MeshCPU } from "../mesh.js";
 import { TextureCPU } from "../texture.js";
 import { SkeletonCPU } from "../skeleton.js";

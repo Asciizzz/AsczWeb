@@ -1,18 +1,18 @@
 {
-  "name": "ascz-monorepo",
-  "private": true,
-  "workspaces": [
-    "Atoolkit",
-    "WeebGfx"
-  ],
-  "scripts": {
-    "dev": "vite",
-    "typecheck": "tsc --noEmit",
-    "yalc:publish": "cd Atoolkit && npx yalc publish && cd ../WeebGfx && npx yalc publish",
-    "yalc:push": "cd Atoolkit && npx yalc push && cd ../WeebGfx && npx yalc push"
-  },
-  "devDependencies": {
-    "@webgpu/types": "^0.1.71",
-    "typescript": "^5.4.0"
-  }
+	"name": "ascz-monorepo",
+	"private": true,
+	"workspaces": [
+		"Atoolkit",
+		"WeebGfx"
+	],
+	"scripts": {
+		"build": "cd Atoolkit && npm run build",
+		"typecheck": "tsc --noEmit",
+		"yalc:publish": "cd Atoolkit && npx yalc publish && cd ../WeebGfx && npx yalc publish",
+		"yalc:push": "cd Atoolkit && npx yalc push && cd ../WeebGfx && npx yalc push"
+	},
+	"devDependencies": {
+		"@webgpu/types": "^0.1.71",
+		"typescript": "^5.4.0"
+	}
 }

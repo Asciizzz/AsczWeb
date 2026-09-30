@@ -1,48 +1,44 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable"
-    ],
-    "types": [
-      "@webgpu/types"
-    ],
-    "strict": true,
-    "noEmit": true,
-    "skipLibCheck": true,
-    "isolatedModules": true,
-    "baseUrl": ".",
-    "paths": {
-      "@asciiz/atoolkit": [
-        "./Atoolkit/index.ts"
-      ],
-      "@asciiz/atoolkit/*": [
-        "./Atoolkit/*"
-      ],
-      "@asciiz/weebgfx": [
-        "./WeebGfx/index.ts"
-      ],
-      "@asciiz/weebgfx/*": [
-        "./WeebGfx/*"
-      ]
-    }
-  },
-  "include": [
-    "Atoolkit/**/*.ts",
-    "WeebGfx/**/*.ts",
-    "tests/ModelStudio/**/*.ts",
-    "tests/Backrooms/**/*.ts",
-    "tests/Minimal/**/*.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist",
-    ".tsc-dist",
-    ".vite",
-    "archive"
-  ]
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"lib": [
+			"ES2022",
+			"DOM",
+			"DOM.Iterable"
+		],
+		"types": [
+			"@webgpu/types"
+		],
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"isolatedModules": true,
+		"paths": {
+			"@asciiz/atoolkit": [
+				"./Atoolkit/index.ts"
+			],
+			"@asciiz/atoolkit/*": [
+				"./Atoolkit/*"
+			],
+			"@asciiz/weebgfx": [
+				"./WeebGfx/index.ts"
+			],
+			"@asciiz/weebgfx/*": [
+				"./WeebGfx/*"
+			]
+		}
+	},
+	"include": [
+		"Atoolkit/**/*.ts",
+		"WeebGfx/**/*.ts"
+	],
+	"exclude": [
+		"node_modules",
+		"dist",
+		".tsc-dist",
+		".vite",
+		"archive"
+	]
 }

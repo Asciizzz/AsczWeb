@@ -1,4 +1,4 @@
-import { Mat4 } from "@asciiz/atoolkit/alm/index.js";
+import { Mat4 } from "@asciiz/atoolkit/alm";
 
 /**
  * Joint hierarchy node descriptor storing relative and inverse bind transforms.

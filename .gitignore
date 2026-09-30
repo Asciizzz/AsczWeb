@@ -8,13 +8,7 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Archives and internal notes
-archive/
-.agents/
-AIsigns.md
-tests/
-
-# Plans and design drafts
+# Plans and stuff idk
 plan.md
 *plan.md
 npm-guide.md
