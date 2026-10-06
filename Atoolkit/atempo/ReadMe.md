@@ -8,8 +8,8 @@ Temporal orchestration, cadence quantization, and keyframe sequence evaluation p
 
 Atempo structures temporal operations across seven primitives:
 
-1. `Track<T, TOut>`: Sequence interpolation base class with contiguous timestamp indexing and O(1) cached interval lookup.
-2. `Curve`: Unary scalar transfer function `(t: number) => number` shaping interval progress.
+1. `Track<T, TOut>`: Sequence interpolation base class with contiguous timestamp indexing, parameter bags, and O(1) cached interval lookup.
+2. `Curve<TData>`: Progress transfer function `(t: number, data?: TData, ctx?: InterpolationContext) => number` shaping interval progress.
 3. `Clip`: Multi-track timeline container evaluating heterogeneous tracks simultaneously at common timestamp.
 4. `Cadence`: Exponential half-life decays, critically damped followers, and discrete frame quantizers.
 5. `FixedCadence`: Deterministic simulation timestep accumulator decoupling render frames from discrete ticks.
@@ -40,16 +40,21 @@ export class FloatTrack extends Track<number, number> {
 - Storage layout:
   - `_times: Float64Array`: Resizable contiguous array of double-precision timestamps maintaining ascending chronological order.
   - `_values: T[]`: Ordered array storing keyframe values corresponding to each timestamp.
-  - `_curves: (Curve | undefined)[]`: Ordered array storing interval transfer functions applied across span `[i, i + 1]`.
-- `addKey(time, value, curve)`: Inserts keyframe. Appends in O(1) when timestamp exceeds tail; executes binary search insertion sort in O(N) when inserting out-of-order.
+  - `_curves: (Curve<any> | undefined)[]`: Ordered array storing interval transfer evaluators applied across span `[i, i + 1]`.
+  - `_curveData: (any | undefined)[]`: Ordered array storing parameter bags passed to curve evaluators.
+  - `_fps: (number | undefined)[]`: Ordered array storing optional frame-rate locks per interval.
+  - `fps?: number`: Optional default track-wide frame rate applied to unconstrained intervals.
+- `addKey(time, value, curve?, curveData?, fps?)`: Inserts keyframe. Appends in O(1) when timestamp exceeds tail; executes binary search insertion sort in O(N) when inserting out-of-order.
+- `setCurve(index, curve?, curveData?, fps?)`: Updates curve evaluator and parameters on existing keyframe in O(1).
 - `removeKey(index)`: Shifts timestamp array via `copyWithin` and splices value arrays in O(N).
-- `sample(time, out)`: Evaluates active interval span, computes normalized alpha `(time - t0) / (t1 - t0)`, evaluates interval curve `curve(tau)`, and calls `blend(a, b, alpha, out)`.
-- `getKey(index)`: Returns keyframe object `{ time, value, curve }` at index, or `undefined` if out of bounds.
+- `sample(time, out)`: Evaluates active interval span, quantizes normalized progress `tau` when interval or track FPS is configured, calls `curve(tau, curveData, ctx)`, and invokes `blend(a, b, alpha, out)`.
+- `sampleRatio(ratio, out)`: Evaluates track value at normalized progression ratio in `[0.0, 1.0]`. Maps ratio across track time span: `startTime + ratio * duration`.
+- `getKey(index)`: Returns keyframe object `{ time, value, curve, curveData, fps }` at index, or `undefined` if out of bounds.
 - `extrapolation`: Configures boundary handling:
   - `Extrapolation.Clamp`: Holds boundary value when time is before start or after end.
   - `Extrapolation.Loop`: Wraps evaluation time into `[startTime, endTime)` range via modulo arithmetic.
   - `Extrapolation.PingPong`: Reflects evaluation time back and forth across track duration.
-- Operational invariants:
+- Memory & caching:
   - Caches last sampled interval index `_cachedIndex` for O(1) sequential playback lookup.
   - Falls back to O(log N) binary search on random seek or playback reversal.
   - Reuses provided `out` buffer in subclasses to maintain zero allocations during playback.
@@ -95,7 +100,7 @@ posTrack.sample(1.0, out); // out is [50, 60, 70]
 - Storage & configuration:
   - `dimension: number`: Component count per keyframe (e.g. 2 for Vec2, 3 for Vec3, 4 for Vec4).
 - `blend(a, b, alpha, out)`: Linearly interpolates each vector component across dimension: `out[i] = a[i] * (1 - alpha) + b[i] * alpha`.
-- Operational invariant: Allocates `Float32Array(dimension)` only when `out` parameter is omitted. Mutates caller-provided `out` buffer in-place without heap allocations.
+- Memory: Allocates `Float32Array(dimension)` only when `out` parameter is omitted. Mutates caller-provided `out` buffer in-place without heap allocations.
 
 ### 2.3 QuatTrack
 
@@ -118,7 +123,7 @@ rotTrack.sample(1.0, outQuat);
   - Singularity threshold: When `dot > 0.9995`, falls back to normalized linear interpolation to avoid division by zero in `sin(theta)`.
   - Renormalization: Normalizes output vector to ensure unit quaternion length.
 - `addAxisAngleKey(time, axis, rad, curve)`: Converts axis-angle rotation into quaternion `[x*s, y*s, z*s, cos(rad/2)]` and appends keyframe.
-- Operational invariant: Mutates caller-provided `Float32Array(4)` in-place.
+- Memory: Mutates caller-provided `Float32Array(4)` in-place without heap allocations.
 
 ### 2.4 ColorTrack
 
@@ -141,19 +146,29 @@ colorTrack.sample(0.5, outCol); // Midpoint red/green evaluate to ~0.7071
 - `blend(a, b, alpha, out)`:
   - Under `ColorSpace.PerceptualGamma`: Blends RGB channels in squared space `sqrt((1 - alpha) * a^2 + alpha * b^2)` to preserve luminance energy and eliminate dark midpoint dips. Interpolates alpha channel linearly.
   - Under `ColorSpace.Linear`: Evaluates standard linear interpolation across all channels.
-- Operational invariant: Mutates caller-provided `Float32Array` in-place.
+- Memory: Mutates caller-provided `Float32Array` in-place without heap allocations.
 
 ---
 
 ## 3. Transfer Curves
 
-A curve is a unary scalar function mapping normalized interval progress `t` in `[0, 1]` to shaped evaluation alpha:
+A curve is a scalar progress shaping function mapping normalized interval progress `t` in `[0, 1]` to shaped evaluation alpha. Evaluator functions are stateless singletons that accept optional parameter data bags and interval context:
 
 ```typescript
-export type Curve = (t: number) => number;
+export interface InterpolationContext {
+    readonly dt: number;
+    readonly k0Time: number;
+    readonly k1Time: number;
+}
+
+export type Curve<TData = any> = (
+    t: number,
+    data?: TData,
+    ctx?: InterpolationContext
+) => number;
 ```
 
-Curves reside in `curves/` as stateless functions or parameter factories:
+Curves reside in `curves/` as stateless evaluators:
 
 ```typescript
 import { FloatTrack } from "./tracks/float.js";
@@ -163,39 +178,42 @@ import { bezier } from "./curves/bezier.js";
 
 const track = new FloatTrack();
 
-// Direct function preset
+// Direct stateless function preset
 track.addKey(0.0, 0.0, quadInOut);
 
-// Parameterized factory closure
-track.addKey(1.0, 50.0, step(8));
-track.addKey(2.0, 100.0, bezier(0.25, 0.1, 0.25, 1.0));
+// Parameterized evaluator with data bag
+track.addKey(1.0, 50.0, step, 8);
+track.addKey(2.0, 100.0, bezier, [0.25, 0.1, 0.25, 1.0]);
 
-// Inline closure
-track.addKey(3.0, 200.0, (t) => t * t * t);
+// With discrete frame rate lock (posterize time / 12 fps)
+track.addKey(3.0, 150.0, bezier, [0.25, 0.1, 0.25, 1.0], 12);
+
+// Inline stateless function
+track.addKey(4.0, 200.0, (t) => t * t * t);
 ```
 
 ### Curve Presets Catalog
 
 | Curve | File | Signature | Transfer Formula |
 | :--- | :--- | :--- | :--- |
-| `linear` | `curves/linear.ts` | `Curve` | $f(t) = t$ |
-| `quadIn` | `curves/quad.ts` | `Curve` | $f(t) = t^2$ |
-| `quadOut` | `curves/quad.ts` | `Curve` | $f(t) = t(2 - t)$ |
-| `quadInOut` | `curves/quad.ts` | `Curve` | $t < 0.5 ? 2t^2 : -1 + (4 - 2t)t$ |
-| `cubicIn` | `curves/cubic.ts` | `Curve` | $f(t) = t^3$ |
-| `cubicOut` | `curves/cubic.ts` | `Curve` | $f(t) = (t - 1)^3 + 1$ |
-| `cubicInOut` | `curves/cubic.ts` | `Curve` | $t < 0.5 ? 4t^3 : (t - 1)(2t - 2)^2 + 1$ |
-| `expoIn` | `curves/expo.ts` | `Curve` | $f(t) = 2^{10(t - 1)}$ |
-| `expoOut` | `curves/expo.ts` | `Curve` | $f(t) = 1 - 2^{-10t}$ |
-| `expoInOut` | `curves/expo.ts` | `Curve` | Piecewise base-2 exponential |
-| `step(steps)` | `curves/step.ts` | `(steps?: number) => Curve` | $f(t) = \lfloor t \cdot s \rfloor / s$ |
-| `overshoot(amount)` | `curves/overshoot.ts` | `(amount?: number) => Curve` | Back polynomial with tension $s = \text{amount} \cdot 1.70158$ |
-| `bounce` | `curves/bounce.ts` | `Curve` | 4-stage piecewise bounce polynomial |
-| `elastic` | `curves/elastic.ts` | `Curve` | Exponentially decaying sine oscillation |
-| `holdSnap(frac, over)` | `curves/holdSnap.ts` | `(...) => Curve` | Binary step with overshoot plateau |
-| `bezier(x1, y1, x2, y2)` | `curves/bezier.ts` | `(...) => Curve` | Parametric cubic Bezier via Newton-Raphson |
+| `linear` | `curves/standard.ts` | `Curve` | $f(t) = t$ |
+| `quadIn` | `curves/standard.ts` | `Curve` | $f(t) = t^2$ |
+| `quadOut` | `curves/standard.ts` | `Curve` | $f(t) = t(2 - t)$ |
+| `quadInOut` | `curves/standard.ts` | `Curve` | $t < 0.5 ? 2t^2 : -1 + (4 - 2t)t$ |
+| `cubicIn` | `curves/standard.ts` | `Curve` | $f(t) = t^3$ |
+| `cubicOut` | `curves/standard.ts` | `Curve` | $f(t) = (t - 1)^3 + 1$ |
+| `cubicInOut` | `curves/standard.ts` | `Curve` | $t < 0.5 ? 4t^3 : (t - 1)(2t - 2)^2 + 1$ |
+| `expoIn` | `curves/standard.ts` | `Curve` | $f(t) = 2^{10(t - 1)}$ |
+| `expoOut` | `curves/standard.ts` | `Curve` | $f(t) = 1 - 2^{-10t}$ |
+| `expoInOut` | `curves/standard.ts` | `Curve` | Piecewise base-2 exponential |
+| `overshoot` | `curves/physics.ts` | `Curve<number>` | Back polynomial with tension $s = \text{amount} \cdot 1.70158$, tension in data bag (default 1.15) |
+| `bounce` | `curves/physics.ts` | `Curve` | 4-stage piecewise bounce polynomial |
+| `elastic` | `curves/physics.ts` | `Curve` | Exponentially decaying sine oscillation |
+| `step` | `curves/discrete.ts` | `Curve<number>` | $f(t) = \lfloor t \cdot s \rfloor / s$, with step count in data bag (default 4) |
+| `holdSnap` | `curves/discrete.ts` | `Curve<HoldSnapData>` | Binary step with overshoot plateau, threshold/overshoot in data bag |
+| `bezier` | `curves/bezier.ts` | `Curve<BezierData>` | Parametric cubic Bezier via Newton-Raphson, control points `[x1, y1, x2, y2]` in data bag |
 
-- `bezier(x1, y1, x2, y2)` solves cubic parametric polynomial $X(u) = t$ using 8-iteration Newton-Raphson root finding, falling back to bisection if divergence occurs, then evaluates $Y(u)$.
+- `bezier` solves cubic parametric polynomial $X(u) = t$ using 8-iteration Newton-Raphson root finding, falling back to bisection if divergence occurs, then evaluates $Y(u)$. Reads control points from `data` without allocating closure instances.
 
 ---
 
@@ -232,9 +250,11 @@ function onUpdate(timeSec: number, prevTimeSec: number) {
 - `addTrack(name, track)`: Registers named track in clip, returning track instance.
 - `getTrack(name)`: Retrieves track by name, or `undefined` if not registered.
 - `sample(time, target)`: Evaluates all registered tracks at timestamp, writing results into `target[name]`. Reuses existing typed arrays in `target` to maintain zero heap allocations.
+- `sampleRatio(ratio, target)`: Evaluates all registered tracks at normalized progression ratio in `[0.0, 1.0]`. Maps ratio across bounding span: `startTime + ratio * (endTime - startTime)`. Enables hierarchical cross-clip coordination where master driver tracks control child clip progression.
 - `addMarker(time, label, data)`: Inserts timeline marker and sorts marker array by time.
 - `getMarkersInRange(start, end, out?)`: Returns markers located within interval `[start, end]`. Writes into optional `out` array for zero heap allocations.
 - `sampleCrossedMarkers(previousTime, currentTime, out?)`: Returns markers crossed within time window. Writes into optional `out` array for zero heap allocations. Evaluates ascending order during forward playback; descending order during reverse playback.
+- `sampleCrossedMarkersRatio(previousRatio, currentRatio, out?)`: Identifies markers crossed across normalized progression window `[previousRatio, currentRatio]`. Writes into optional `out` array for zero heap allocations.
 - `duration`: Returns maximum duration among registered tracks.
 - `startTime` & `endTime`: Returns bounding time limits across active tracks.
 

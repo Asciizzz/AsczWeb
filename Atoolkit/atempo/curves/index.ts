@@ -2,13 +2,59 @@
  * Curve presets catalog.
  */
 
-export { linear } from "./linear.js";
-export { step } from "./step.js";
-export { quadIn, quadOut, quadInOut } from "./quad.js";
-export { cubicIn, cubicOut, cubicInOut } from "./cubic.js";
-export { expoIn, expoOut, expoInOut } from "./expo.js";
-export { overshoot } from "./overshoot.js";
-export { bounce } from "./bounce.js";
-export { elastic } from "./elastic.js";
-export { holdSnap } from "./holdSnap.js";
-export { bezier } from "./bezier.js";
+export {
+	linear,
+	quadIn,
+	quadOut,
+	quadInOut,
+	cubicIn,
+	cubicOut,
+	cubicInOut,
+	expoIn,
+	expoOut,
+	expoInOut,
+} from "./standard.js";
+
+export { overshoot, bounce, elastic } from "./physics.js";
+
+export { step, holdSnap, type HoldSnapData } from "./discrete.js";
+
+export { bezier, type BezierData } from "./bezier.js";
+
+import {
+	linear,
+	quadIn,
+	quadOut,
+	quadInOut,
+	cubicIn,
+	cubicOut,
+	cubicInOut,
+	expoIn,
+	expoOut,
+	expoInOut,
+} from "./standard.js";
+import { overshoot, bounce, elastic } from "./physics.js";
+import { step, holdSnap } from "./discrete.js";
+import { bezier } from "./bezier.js";
+
+/**
+ * Unified curve presets dictionary for autocomplete discovery.
+ */
+export const Curves = {
+	linear,
+	quadIn,
+	quadOut,
+	quadInOut,
+	cubicIn,
+	cubicOut,
+	cubicInOut,
+	expoIn,
+	expoOut,
+	expoInOut,
+	overshoot,
+	bounce,
+	elastic,
+	step,
+	holdSnap,
+	bezier,
+} as const;

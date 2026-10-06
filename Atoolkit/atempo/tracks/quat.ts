@@ -69,13 +69,20 @@ export class QuatTrack extends Track<ArrayLike<number>, Float32Array> {
         return out;
     }
 
-    /**
-     * Appends keyframe converted from axis and angle in radians.
-     */
-    addAxisAngleKey(time: number, axis: ArrayLike<number>, rad: number, curve?: Curve): this {
-        const half = rad * 0.5;
-        const s = Math.sin(half);
-        const q = [axis[0] * s, axis[1] * s, axis[2] * s, Math.cos(half)];
-        return this.addKey(time, q, curve);
-    }
+	/**
+	 * Appends keyframe converted from axis and angle in radians.
+	 */
+	addAxisAngleKey(
+		time: number,
+		axis: ArrayLike<number>,
+		rad: number,
+		curve?: Curve<any>,
+		curveData?: any,
+		fps?: number
+	): this {
+		const half = rad * 0.5;
+		const s = Math.sin(half);
+		const q = [axis[0] * s, axis[1] * s, axis[2] * s, Math.cos(half)];
+		return this.addKey(time, q, curve, curveData, fps);
+	}
 }

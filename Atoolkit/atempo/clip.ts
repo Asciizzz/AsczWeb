@@ -131,4 +131,31 @@ export class Clip {
         }
         return target;
     }
+
+	/**
+	 * Evaluates all registered tracks at normalized progression ratio in [0.0, 1.0].
+	 * Maps ratio across clip bounding span: startTime + ratio * (endTime - startTime).
+	 *
+	 * @param ratio Normalized progression ratio in [0.0, 1.0]
+	 * @param target Output dictionary
+	 */
+	sampleRatio(ratio: number, target: Record<string, any> = {}): Record<string, any> {
+		const span = this.endTime - this.startTime;
+		const time = span > 0 ? this.startTime + ratio * span : this.startTime;
+		return this.sample(time, target);
+	}
+
+	/**
+	 * Identifies markers crossed between previousRatio and currentRatio.
+	 * Maps normalized progression ratios across clip bounding span.
+	 *
+	 * @param previousRatio Previous frame progression ratio in [0.0, 1.0]
+	 * @param currentRatio Current frame progression ratio in [0.0, 1.0]
+	 * @param out Optional pre-allocated destination array
+	 */
+	sampleCrossedMarkersRatio(previousRatio: number, currentRatio: number, out?: ClipMarker[]): ClipMarker[] {
+		const span = this.endTime - this.startTime;
+		const start = this.startTime;
+		return this.sampleCrossedMarkers(start + previousRatio * span, start + currentRatio * span, out);
+	}
 }
