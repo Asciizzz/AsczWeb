@@ -1,6 +1,6 @@
 # Acircuit
 
-Directed value computation circuit featuring typed socket endpoints, 1-to-1 input connections, 1-to-N output fan-out, static graph validation, subcircuit composite encapsulation, and dependency plan caching.
+Directed value computation circuit featuring typed socket endpoints, 1-to-1 input connections, 1-to-N output fan-out, transactional topology validation, composite subcircuit encapsulation, and revision-keyed dependency plan caching.
 
 ---
 
@@ -8,11 +8,11 @@ Directed value computation circuit featuring typed socket endpoints, 1-to-1 inpu
 
 Acircuit structures computational graphs across five core primitives:
 
-1. `Socket`: Input and output endpoint descriptors with optional data type and requirement tags.
-2. `Wire`: Directed connection interface linking an output endpoint to an input endpoint.
-3. `Chip`: Stateless computational unit declaring socket interfaces and evaluating input records.
-4. `Circuit`: Graph topology owner resolving dependencies, performing static analysis, and caching execution plans.
-5. `Subcircuit`: Composite chip encapsulating an inner circuit with boundary socket mapping and graph inlining support.
+1. `Socket`: Input and output endpoint descriptors with data type, direction (`SocketDirection.Input` / `SocketDirection.Output`), optional default value, and metadata.
+2. `Wire`: Directed connection linking an output endpoint `(fromChipId, fromSocketName)` to an input endpoint `(toChipId, toSocketName)`.
+3. `Chip`: Computational unit declaring input/output socket schemas and evaluating `(inputs, outputs)` during a circuit run.
+4. `Circuit`: Graph topology owner enforcing transactional wiring, cycle detection, and revision-keyed execution plan caching.
+5. `CompositeChip` & `ChipProxy`: Subgraph container exposing selected inner sockets as boundary ports and flattening inner topology into a parent circuit via prefixed proxy chips.
 
 ---
 
@@ -21,205 +21,182 @@ Acircuit structures computational graphs across five core primitives:
 `Socket` represents an endpoint on a computational chip. `Wire` connects an output socket to an input socket.
 
 ```typescript
-import { Socket, inSocketKey, wireEquals, type Wire } from "./index.js";
+import { Socket, SocketDirection, Wire, encodeEndpointKey } from "@asciiz/atoolkit/acircuit";
 
-// Endpoint definition with data type and requirement tags
-const inSocket = new Socket("intensity", "input", "number", true);
-const outSocket = new Socket("result", "output", "number", false);
+// Endpoint definition with data type, direction, and default value
+const inSocket = new Socket("intensity", "number", SocketDirection.Input, 1.0);
+const outSocket = new Socket("result", "number", SocketDirection.Output, 0.0);
+void inSocket;
+void outSocket;
 
-// Wire interface
-const wire: Wire = {
-    outChipId: "sourceChip",
-    outSocket: "result",
-    inChipId: "targetChip",
-    inSocket: "intensity",
-};
-
-// Endpoint lookup key
-const key = inSocketKey("targetChip", "intensity"); // "targetChip:intensity"
+// Wire instance
+const wire = new Wire("sourceChip", "result", "targetChip", "intensity");
+const endpointKey = encodeEndpointKey(wire.toChipId, wire.toSocketName);
+void endpointKey;
 ```
 
-- `Socket(name, direction, dataType?, required?)`: Instantiates endpoint. `direction` enforces `"input"` or `"output"`. Positional arguments configure `dataType` (for type compatibility enforcement) and `required` (for static validation).
-- `Wire`: Immutable directed connection describing `{ outChipId, outSocket, inChipId, inSocket }`.
-  - Input sockets enforce 1-to-1 wiring; connecting a new wire replaces any pre-existing connection.
+- `Socket(name, type, direction, defaultValue?, metadata?)`: Instantiates an endpoint. `type` specifies socket data type (or `WILDCARD_TYPE = "*"` to match any type). `direction` is `SocketDirection.Input` or `SocketDirection.Output`.
+- `Wire(fromChipId, fromSocketName, toChipId, toSocketName, metadata?)`: Directed connection linking producer endpoint to consumer endpoint.
+  - Input sockets enforce 1-to-1 wiring; connecting a new wire replaces any pre-existing connection only after endpoint validation succeeds.
   - Output sockets support 1-to-N fan-out to multiple downstream inputs.
-- `inSocketKey(chipId, socketName)` / `outSocketKey`: Generates colon-delimited lookup keys (`"chipId:socketName"`).
-- `wireEquals(a, b)`: Compares two wire instances across all four endpoint coordinates.
-- `formatWire(wire)`: Formats connection string for diagnostic logging: `"(outChip:outSocket -> inChip:inSocket)"`.
+  - Internal endpoint maps use length-prefixed keys via `encodeEndpointKey(chipId, socketName)` so chip IDs and socket names may contain arbitrary characters such as `:` or `/`.
+- `canConnectInput(inSocket, outSocket)`: Verifies direction (`Input` vs `Output`) and type compatibility (exact match or `WILDCARD_TYPE`).
 
 ---
 
 ## 2. Computational Chips
 
-`Chip` represents a stateless processing unit with declared inputs and outputs. Values belong strictly to the circuit run, not to the chip instance.
+`Chip` represents a processing unit with declared inputs and outputs. Runtime socket values belong strictly to each `circuit.run()` invocation, not to the `Chip` instance.
 
 ```typescript
-import { Chip, type ProcessCtx } from "./index.js";
+import { Chip } from "@asciiz/atoolkit/acircuit";
 
-class MultiplyAddChip extends Chip {
-    constructor(id: string) {
-        super(id, "MultiplyAdd");
-        this.addInput("a", "number")
-            .addInput("b", "number")
-            .addInput("c", "number")
-            .addOutput("result", "number");
-    }
-
-    override canConnectInput(
-        inSocketName: string,
-        outChip: Chip,
-        outSocketName: string
-    ): boolean {
-        // Enforces socket existence and dataType matching
-        return super.canConnectInput(inSocketName, outChip, outSocketName);
-    }
-
-    override process(
-        inputs: Record<string, any>,
-        ctx?: ProcessCtx
-    ): Record<string, any> {
-        const a = typeof inputs.a === "number" ? inputs.a : 0;
-        const b = typeof inputs.b === "number" ? inputs.b : 0;
-        const c = typeof inputs.c === "number" ? inputs.c : 0;
-        return { result: (a * b) + c };
-    }
-}
+const multiplyAdd = new Chip(
+	"mad1",
+	"MultiplyAdd",
+	(inputs, outputs) => {
+		const a = typeof inputs.a === "number" ? inputs.a : 0;
+		const b = typeof inputs.b === "number" ? inputs.b : 0;
+		const c = typeof inputs.c === "number" ? inputs.c : 0;
+		outputs.result = a * b + c;
+	}
+)
+	.addInput("a", "number", 0)
+	.addInput("b", "number", 1)
+	.addInput("c", "number", 0)
+	.addOutput("result", "number", 0);
+void multiplyAdd;
 ```
 
-- `Chip(id, name)`: Abstract base constructor registering immutable string identifier and debug name.
-- `addInput(socketOrName, dataType?, required?)` / `addOutput(socketOrName, dataType?)`: Registers endpoints with optional type validation tags.
-- `canConnectInput(inSocketName, outChip, outSocketName)`: Pre-connection validation gate invoked by `Circuit.connect()`. Verifies type compatibility when data types are declared.
-- `process(inputs, ctx)`: Evaluates chip using resolved input values for the current pass.
-- `ChipProxy`: Transparent proxy chip delegating execution and configuration to a wrapped source chip.
+- `Chip(id, label?, process?, metadata?)`: Constructs a chip with an immutable non-empty `id`, display `label`, and processor callback `(inputs, outputs) => void`.
+- `addInput(name, type, defaultValue?, metadata?)` / `addOutput(name, type, defaultValue?, metadata?)` / `removeInput(name)` / `removeOutput(name)`: Registers or removes endpoints. While a `Chip` is attached to one or more `Circuit` instances (`isSchemaLocked === true`), its port schema is locked and mutating ports throws an `Error`.
+- `inputs` / `outputs`: Returns a defensive `ReadonlyMap<string, Socket>` snapshot of declared sockets.
+- `ChipProxy`: Proxy chip wrapping an inner chip under a prefixed ID (`${prefix}/${original.id}`) while delegating execution to `original.process`.
 
 ---
 
-## 3. Circuit Topology and Static Validation
+## 3. Circuit Topology and Plan Compilation
 
-`Circuit` manages chip collections, maintains multi-map wire indices, validates acyclic constraints, and caches execution plans.
+`Circuit` manages chip collections, maintains structured wire indices, validates acyclic constraints, and caches topological execution plans keyed by structural `revision`.
 
 ```typescript
-import { Circuit } from "./index.js";
+import { Chip, Circuit } from "@asciiz/atoolkit/acircuit";
 
-const circuit = new Circuit("AudioSignalPipeline");
+function createGainChip(id: string, defaultIn = 0): Chip {
+	return new Chip(id, "Gain", (inputs, outputs) => {
+		outputs.result = (typeof inputs.a === "number" ? inputs.a : 0) * 2;
+	})
+		.addInput("a", "number", defaultIn)
+		.addOutput("result", "number", 0);
+}
 
-const chipA = new MultiplyAddChip("chipA");
-const chipB = new MultiplyAddChip("chipB");
+const circuit = new Circuit({ label: "AudioSignalPipeline" });
+
+const chipA = createGainChip("chipA", 5);
+const chipB = createGainChip("chipB", 0);
 
 // Graph construction
-circuit.addChip(chipA);
-circuit.addChip(chipB);
+circuit.addChip(chipA).addChip(chipB);
 
-// Wire connection (replaces existing connection on chipB:a)
+// Wire connection (replaces existing connection on chipB.a after validation)
 const wire = circuit.connect(chipA, "result", chipB, "a");
+void wire;
 
-// Static validation without throwing
-const validation = circuit.validate();
-if (!validation.valid) {
-    console.error("Circuit issues:", validation.issues);
+// Compile and inspect topological order
+const compiled = circuit.compile();
+void compiled;
+```
+
+- `addChip(chip)`: Registers a chip and locks its socket schema (`chip.isSchemaLocked === true`). Passing a different `Chip` instance with an already-registered ID throws an `Error`.
+- `connect(outChip, outSocketName, inChip, inSocketName, metadata?)`: Rejects self-loops (`outChip.id === inChip.id`), validates chip ID collisions, endpoint existence, and `canConnectInput` before mutating state, replaces any pre-existing wire on the destination input, and increments `revision`.
+- `replaceChip(newChip)`: Transactionally replaces a chip of the same ID after validating that all incident incoming and outgoing wires remain valid against `newChip`'s socket schema.
+- `removeChip(chipId)`: Removes a chip and all of its incident wires, unlocking the chip's port schema.
+- `disconnect(fromChipId, fromSocketName, toChipId, toSocketName)` / `disconnectInput(inChipId, inSocketName)`: Removes a wire and increments `revision`.
+- `compile()` / `topoSort()`: Computes and caches the topological evaluation order via Kahn's algorithm and returns a fresh array copy so caller array mutations cannot corrupt the cached plan. Throws an `Error` if the circuit contains a cycle.
+
+---
+
+## 4. Composite Subcircuits and Inlining
+
+`CompositeChip` wraps an inner `Circuit` as a composite chip, exposing selected inner sockets as external ports and supporting transactional flattening into a parent circuit.
+
+```typescript
+import { Chip, Circuit, CompositeChip } from "@asciiz/atoolkit/acircuit";
+
+function createPassChip(id: string): Chip {
+	return new Chip(id, "Pass", (inputs, outputs) => {
+		outputs.result = inputs.signal ?? 0;
+	})
+		.addInput("signal", "number", 0)
+		.addOutput("result", "number", 0);
 }
+
+const inner = new Circuit({ label: "FilterBlock" });
+const preAmp = createPassChip("innerPreAmp");
+const postAmp = createPassChip("innerPostAmp");
+inner.addChip(preAmp).addChip(postAmp);
+inner.connect(preAmp, "result", postAmp, "signal");
+
+const composite = new CompositeChip("filter1", inner, "AudioFilter")
+	.exposeInput("audioIn", "innerPreAmp", "signal")
+	.exposeOutput("audioOut", "innerPostAmp", "result");
+
+const mainCircuit = new Circuit({ label: "Main" });
+// Transactionally inline inner chips into mainCircuit as prefixed ChipProxy instances ("filter1/innerPreAmp", etc.)
+const proxies = composite.flattenInto(mainCircuit);
+void proxies;
 ```
 
-- Storage structures:
-  - `chips: Map<string, Chip>`: Registered chips by identifier.
-  - `_inWires: Map<string, Wire>`: 1-to-1 map keyed by `"inChipId:inSocket"`.
-  - `_outWires: Map<string, Wire[]>`: 1-to-N map keyed by `"outChipId:outSocket"`.
-  - `_chipInWires` / `_chipOutWires`: Grouped wire indices by chip ID for fast bulk disconnection.
-- `connect(outChip, outSocket, inChip, inSocket)`: Validates endpoints, enforces `canConnectInput`, replaces pre-existing wire on destination input, and invalidates cached plan.
-- `disconnect(wireOrChipId, inSocketName?)`: Removes matching wire from indices and invalidates plan.
-- `disconnectAll(chipOrId)`: Removes all connections associated with chip.
-- `validate()`: Statically analyzes graph and returns `{ valid: boolean, issues: CircuitIssue[] }`. Detects:
-  - Cycles (`"cycle"`)
-  - Missing required inputs (`"missing_input"`)
-  - Mismatched socket data types (`"type_mismatch"`)
-  - Isolated disconnected chips (`"isolated_chip"`)
+- `exposeInput(externalName, innerChipId, innerSocketName)`: Exposes an input socket of an inner chip on the `CompositeChip`.
+- `exposeOutput(externalName, innerChipId, innerSocketName)`: Exposes an output socket of an inner chip on the `CompositeChip`.
+- `flattenInto(targetCircuit)`: Preflights all proxy IDs (`${composite.id}/${innerChip.id}`) and internal wires before mutating `targetCircuit`, then adds `ChipProxy` instances and connects their internal wires.
 
 ---
 
-## 4. Graph Inspection and Traversal
+## 5. Serialization and Merging
 
-`Circuit` provides non-destructive graph analysis queries:
-
-- `getSources()`: Returns array of chips with indegree 0 (zero incoming wires).
-- `getSinks()`: Returns array of chips with outdegree 0 (zero outgoing wires).
-- `getUpstreamChips(chipOrId)`: Returns a `Set<Chip>` containing all transitive ancestor dependencies feeding into the specified chip.
-- `getDownstreamChips(chipOrId)`: Returns a `Set<Chip>` containing all transitive descendant chips fed by the specified chip.
-- `isReachable(fromChip, toChip)`: Returns boolean indicating whether a directed path exists from source to target.
+- `toJSON()`: Serializes chips, sockets, wires, and metadata into a portable `SerializedCircuit` structure.
+- `Circuit.fromJSON(data, processorRegistry?)`: Reconstructs a `Circuit` topology from serialized data, binding processor functions by chip ID from `processorRegistry`.
+- `merge(otherCircuit)`: Transactionally preflights all chip IDs and wires in `otherCircuit` before merging them into this circuit.
 
 ---
 
-## 5. Dead Code Elimination and Subgraphs
+## 6. Topological Execution Pipeline
 
-`Circuit` supports pruning unused chips and extracting isolated sub-graphs:
+`circuit.run(options?)` evaluates chips in topological dependency order using run-local input and output records.
 
 ```typescript
-// Prunes all chips that do not contribute to target sinks
-circuit.pruneUnreachable(["outputChip"]);
+import { Chip, Circuit } from "@asciiz/atoolkit/acircuit";
 
-// Extracts minimal subgraph required to compute target chips
-const subCircuit = circuit.extractSubgraph(["outputChip"]);
-```
+const sourceChip = new Chip("chipA", "Source", (_inputs, outputs) => {
+	outputs.result = 2 * 3 + 4;
+}).addOutput("result", "number", 0);
 
-- `pruneUnreachable(targetChipIds?)`: Keeps target chips (or all sinks if omitted) and their transitive upstream dependencies; removes all non-contributing chips and wires from the circuit.
-- `extractSubgraph(targetChipIds, label?)`: Constructs and returns a new `Circuit` containing only target chips, their transitive upstream dependencies, and interconnecting wires.
+let finalOutput = 0;
+const sinkChip = new Chip("chipB", "Sink", (inputs, outputs) => {
+	const a = typeof inputs.a === "number" ? inputs.a : 0;
+	finalOutput = a + 10;
+	outputs.result = finalOutput;
+})
+	.addInput("a", "number", 0)
+	.addOutput("result", "number", 0);
 
----
+const circuit = new Circuit({ label: "ExecPipeline" });
+circuit.connect(sourceChip, "result", sinkChip, "a");
 
-## 6. Composite Subcircuits and Inlining
-
-`Subcircuit` wraps an entire inner circuit as a single computational chip, mapping outer boundary sockets to inner chips.
-
-```typescript
-import { Circuit, Subcircuit } from "./index.js";
-
-const inner = new Circuit("FilterBlock");
-// ... populate inner circuit ...
-
-const composite = new Subcircuit("filter1", "AudioFilter", inner);
-composite.mapInput("audioIn", "innerPreAmp", "signal");
-composite.mapOutput("audioOut", "innerPostAmp", "result");
-
-const mainCircuit = new Circuit("Main");
-mainCircuit.addChip(composite);
-
-// Inline/flatten composite into parent circuit
-mainCircuit.flatten("filter1");
-```
-
-- `mapInput(outerSocket, innerChipId, innerSocket, dataType?)`: Maps external input to internal chip input.
-- `mapOutput(outerSocket, innerChipId, innerSocket, dataType?)`: Maps internal chip output to external output.
-- `flatten(chipOrId, prefix?)`: Inlines inner chips into parent circuit with prefixed IDs, re-routes incoming and outgoing wires directly to inner endpoints, copies inner wires, and removes composite chip.
-
----
-
-## 7. Serialization, Cloning, and Merging
-
-- `toJSON()`: Serializes topology, sockets, and metadata into a portable `SerializedCircuit` structure.
-- `Circuit.fromJSON(json, chipFactory)`: Reconstructs circuit graph using a factory callback instantiating chips by descriptor.
-- `clone(chipCloner?)`: Duplicates circuit and interconnecting wires.
-- `merge(other, prefix?)`: Merges another circuit into this graph with optional ID prefixing.
-
----
-
-## 8. Topological Execution Pipeline
-
-`circuit.run()` evaluates chips in dependency order using run-local input and output records.
-
-```typescript
-import { Circuit, type RunOptions, type RunResult } from "./index.js";
-
+const entered: string[] = [];
 const result = circuit.run({
-    overrides: {
-        chipA: { a: 2, b: 3, c: 4 },
-        chipB: { b: 10, c: 5 },
-    },
-    ctx: { sampleRate: 44100 },
-    onChipEnter: (chip, inputs) => console.log(`Executing ${chip.id}`),
-    onChipLeave: (chip, outputs) => console.log(`Completed ${chip.id}`, outputs),
-    onWireTransmit: (wire, value) => console.log(`Wire transmitted:`, wire, value),
+	errorPolicy: "skip-dependents",
+	onChipEnter: (chip) => entered.push(chip.id),
 });
 
-const finalOutput = result.outputs.get("chipB")?.result;
-console.log(result.executedChips);
-console.log(result.errors);
+void result.completed;
+void finalOutput;
 ```
+
+- `CircuitRunOptions`:
+  - `errorPolicy?: "skip-dependents" | "fail-fast"`: Under `"skip-dependents"` (default), if a chip processor throws, its error is recorded in `result.errors` and downstream dependent chips are skipped (`result.skippedChipIds`) while independent branches continue. Under `"fail-fast"`, processor exceptions are rethrown immediately.
+  - `onChipEnter?: (chip, inputs) => void`: Invoked before each chip processor runs.
+  - `onChipLeave?: (chip, outputs) => void`: Invoked after each chip processor succeeds.
+  - `onWireTransmit?: (wire, value) => void`: Invoked as each outgoing wire transfers a value.
+  - `onError?: (chip, error) => void`: Invoked when a chip processor throws.

@@ -3,140 +3,230 @@
 // ================================================================
 
 export type StructFieldType =
-    | "i8"
-    | "u8"
-    | "i16"
-    | "u16"
-    | "i32"
-    | "u32"
-    | "f32"
-    | "f64"
-    | "v128"
-    | "ptr";
+	| "i8"
+	| "u8"
+	| "i16"
+	| "u16"
+	| "i32"
+	| "u32"
+	| "i64"
+	| "u64"
+	| "f32"
+	| "f64"
+	| "v128"
+	| "ptr";
 
 export interface StructField {
-    name: string;
-    type: StructFieldType;
-    count: number;
-    byteOffset: number;
-    byteSize: number;
-    alignment: number;
+	readonly name: string;
+	readonly type: StructFieldType;
+	readonly count: number;
+	readonly byteOffset: number;
+	readonly byteSize: number;
+	readonly alignment: number;
 }
 
 export interface StructDescriptor {
-    name: string;
-    fields: StructField[];
-    stride: number;
-    alignment: number;
-    fieldMap: Map<string, StructField>;
+	readonly name: string;
+	readonly fields: ReadonlyArray<StructField>;
+	readonly stride: number;
+	readonly alignment: number;
+	readonly fieldMap: ReadonlyMap<string, StructField>;
+}
+
+interface FieldSpec {
+	readonly name: string;
+	readonly type: StructFieldType;
+	readonly count: number;
+	readonly baseSize: number;
+	readonly requestedAlignment: number;
 }
 
 const TYPE_SIZES: Record<StructFieldType, number> = {
-    i8: 1,
-    u8: 1,
-    i16: 2,
-    u16: 2,
-    i32: 4,
-    u32: 4,
-    f32: 4,
-    f64: 8,
-    v128: 16,
-    ptr: 4,
+	i8: 1,
+	u8: 1,
+	i16: 2,
+	u16: 2,
+	i32: 4,
+	u32: 4,
+	i64: 8,
+	u64: 8,
+	f32: 4,
+	f64: 8,
+	v128: 16,
+	ptr: 4,
 };
 
 const TYPE_ALIGNMENTS: Record<StructFieldType, number> = {
-    i8: 1,
-    u8: 1,
-    i16: 2,
-    u16: 2,
-    i32: 4,
-    u32: 4,
-    f32: 4,
-    f64: 8,
-    v128: 16,
-    ptr: 4,
+	i8: 1,
+	u8: 1,
+	i16: 2,
+	u16: 2,
+	i32: 4,
+	u32: 4,
+	i64: 8,
+	u64: 8,
+	f32: 4,
+	f64: 8,
+	v128: 16,
+	ptr: 4,
 };
 
+function isPowerOfTwo(val: number): boolean {
+	return (
+		Number.isSafeInteger(val) &&
+		val >= 1 &&
+		val <= 0x40000000 &&
+		(val & (val - 1)) === 0
+	);
+}
+
+function alignUp(offset: number, alignment: number): number {
+	const rem = offset % alignment;
+	return rem === 0 ? offset : offset + (alignment - rem);
+}
+
 /**
- * Declarative binary struct layout calculator conforming to C/Rust repr(C) rules.
- * Computes member byte offsets, alignment padding, and total struct stride with SIMD support.
+ * Declarative `wasm32` scalar/SIMD struct layout calculator.
+ *
+ * Layout contract:
+ * - Uses `wasm32` natural scalar alignments (`i8`/`u8`: 1, `i16`/`u16`: 2, `i32`/`u32`/`f32`/`ptr`: 4,
+ *   `i64`/`u64`/`f64`: 8, `v128`: 16) unless overridden per field via `explicitAlignment`.
+ * - Rejects duplicate field names, invalid types, non-positive counts, and non-power-of-two alignments.
+ * - If `packAlignment` is passed to `finish(packAlignment)`, each field's effective alignment is
+ *   `Math.min(fieldAlignment, packAlignment)` and the final struct alignment/stride is padded to
+ *   `Math.min(maxFieldAlignment, packAlignment)`.
+ * - `finish()` returns a frozen, immutable `StructDescriptor` snapshot that cannot be mutated by
+ *   subsequent builder calls or external array modifications.
  */
 export class StructLayout {
-    private readonly _name: string;
-    private readonly _fields: StructField[];
-    private _currentOffset: number;
-    private _maxAlignment: number;
+	readonly #name: string;
+	readonly #fieldSpecs: FieldSpec[] = [];
+	readonly #fieldNames = new Set<string>();
 
-    constructor(name: string = "AnonymousStruct") {
-        this._name = name;
-        this._fields = [];
-        this._currentOffset = 0;
-        this._maxAlignment = 1;
-    }
+	constructor(name = "AnonymousStruct") {
+		if (typeof name !== "string" || name.length === 0) {
+			throw new TypeError("StructLayout: struct name must be a non-empty string.");
+		}
+		this.#name = name;
+	}
 
-    /**
-     * Appends a member field to the layout, aligning offset to the field's natural or explicit alignment.
-     */
-    public field(name: string, type: StructFieldType, count: number = 1, explicitAlignment?: number): this {
-        if (count <= 0) {
-            throw new Error(`Field count must be at least 1, received ${count}`);
-        }
+	/**
+	 * Appends a member field to the layout definition.
+	 */
+	field(
+		name: string,
+		type: StructFieldType,
+		count = 1,
+		explicitAlignment?: number
+	): this {
+		if (typeof name !== "string" || name.length === 0) {
+			throw new TypeError("StructLayout.field: field name must be a non-empty string.");
+		}
+		if (this.#fieldNames.has(name)) {
+			throw new Error(
+				`StructLayout.field: duplicate field name '${name}' in struct '${this.#name}'.`
+			);
+		}
+		if (!(type in TYPE_SIZES)) {
+			throw new TypeError(
+				`StructLayout.field: unknown field type '${String(type)}' for field '${name}'.`
+			);
+		}
+		if (!Number.isSafeInteger(count) || count < 1) {
+			throw new RangeError(
+				`StructLayout.field: count must be a positive integer, received ${count}.`
+			);
+		}
+		if (explicitAlignment !== undefined && !isPowerOfTwo(explicitAlignment)) {
+			throw new RangeError(
+				`StructLayout.field: explicitAlignment must be a positive power of two, received ${explicitAlignment}.`
+			);
+		}
 
-        const baseSize = TYPE_SIZES[type];
-        const baseAlign = explicitAlignment ?? TYPE_ALIGNMENTS[type];
-        const totalSize = baseSize * count;
+		const baseSize = TYPE_SIZES[type];
+		const requestedAlignment = explicitAlignment ?? TYPE_ALIGNMENTS[type];
 
-        const mask = baseAlign - 1;
-        const alignedOffset = (this._currentOffset + mask) & ~mask;
+		this.#fieldNames.add(name);
+		this.#fieldSpecs.push({
+			name,
+			type,
+			count,
+			baseSize,
+			requestedAlignment,
+		});
 
-        this._fields.push({
-            name,
-            type,
-            count,
-            byteOffset: alignedOffset,
-            byteSize: totalSize,
-            alignment: baseAlign,
-        });
+		return this;
+	}
 
-        this._currentOffset = alignedOffset + totalSize;
-        if (baseAlign > this._maxAlignment) {
-            this._maxAlignment = baseAlign;
-        }
+	/**
+	 * Computes field offsets, struct alignment, and total stride, returning an immutable `StructDescriptor` snapshot.
+	 * When `packAlignment` is provided (for example `1`, `2`, `4`, `8`), caps each field's effective alignment
+	 * to `Math.min(fieldAlignment, packAlignment)` before computing field offsets and final stride.
+	 */
+	finish(packAlignment?: number): StructDescriptor {
+		if (packAlignment !== undefined && !isPowerOfTwo(packAlignment)) {
+			throw new RangeError(
+				`StructLayout.finish: packAlignment must be a positive power of two, received ${packAlignment}.`
+			);
+		}
 
-        return this;
-    }
+		const fields: StructField[] = [];
+		const fieldMap = new Map<string, StructField>();
+		let currentOffset = 0;
+		let maxEffectiveAlign = 1;
 
-    /**
-     * Finalizes struct layout, computing total stride padded to a multiple of largest member alignment.
-     */
-    public finish(packAlignment?: number): StructDescriptor {
-        const align = packAlignment !== undefined ? Math.min(this._maxAlignment, packAlignment) : this._maxAlignment;
-        const mask = align - 1;
-        const stride = (this._currentOffset + mask) & ~mask;
+		for (let i = 0; i < this.#fieldSpecs.length; i++) {
+			const spec = this.#fieldSpecs[i];
+			const effectiveAlign =
+				packAlignment !== undefined
+					? Math.min(spec.requestedAlignment, packAlignment)
+					: spec.requestedAlignment;
 
-        const fieldMap = new Map<string, StructField>();
-        for (let i = 0; i < this._fields.length; i++) {
-            const f = this._fields[i];
-            fieldMap.set(f.name, f);
-        }
+			const byteOffset = alignUp(currentOffset, effectiveAlign);
+			const byteSize = spec.baseSize * spec.count;
 
-        return {
-            name: this._name,
-            fields: [...this._fields],
-            stride,
-            alignment: align,
-            fieldMap,
-        };
-    }
+			const fieldObj: StructField = Object.freeze({
+				name: spec.name,
+				type: spec.type,
+				count: spec.count,
+				byteOffset,
+				byteSize,
+				alignment: effectiveAlign,
+			});
 
-    /**
-     * Retrieves member field metadata from a compiled StructDescriptor in O(1) time.
-     */
-    public static getField(descriptor: StructDescriptor, name: string): StructField {
-        const field = descriptor.fieldMap.get(name);
-        if (!field) {
-            throw new Error(`Field '${name}' not found in struct '${descriptor.name}'`);
-        }
-        return field;
-    }
+			fields.push(fieldObj);
+			fieldMap.set(spec.name, fieldObj);
+
+			currentOffset = byteOffset + byteSize;
+			if (effectiveAlign > maxEffectiveAlign) {
+				maxEffectiveAlign = effectiveAlign;
+			}
+		}
+
+		const structAlign =
+			packAlignment !== undefined
+				? Math.min(maxEffectiveAlign, packAlignment)
+				: maxEffectiveAlign;
+		const stride = alignUp(currentOffset, structAlign);
+
+		const frozenFields = Object.freeze(fields);
+		return Object.freeze({
+			name: this.#name,
+			fields: frozenFields,
+			stride,
+			alignment: structAlign,
+			fieldMap,
+		});
+	}
+
+	/**
+	 * Retrieves member field metadata from a compiled `StructDescriptor` in O(1) time.
+	 */
+	static getField(descriptor: StructDescriptor, name: string): StructField {
+		const field = descriptor.fieldMap.get(name);
+		if (!field) {
+			throw new Error(`Field '${name}' not found in struct '${descriptor.name}'.`);
+		}
+		return field;
+	}
 }

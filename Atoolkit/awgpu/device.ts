@@ -1,190 +1,295 @@
-// ================================================================
-//  Awgpu - Level 0: Hardware Foundation
-// ================================================================
+export interface DeviceDescriptor {
+	/** Power preference hint for adapter selection. */
+	powerPreference?: GPUPowerPreference;
+	/** Required hardware features to request from the adapter. */
+	requiredFeatures?: GPUFeatureName[];
+	/** Required hardware limits to request from the adapter. */
+	requiredLimits?: Record<string, number>;
+	/** Optional debug label for the created GPUDevice. */
+	label?: string;
+	/** Optional callback invoked when the device is lost. */
+	onLost?: (info: GPUDeviceLostInfo) => void;
+	/** Optional callback invoked on uncaptured WebGPU validation or out-of-memory errors. */
+	onUncapturedError?: (error: GPUError) => void;
+}
 
-export interface DeviceConfig {
-    canvas?: HTMLCanvasElement | string | null;
-    powerPreference?: GPUPowerPreference;
-    requiredFeatures?: GPUFeatureName[];
-    requiredLimits?: Record<string, number>;
-    alphaMode?: GPUCanvasAlphaMode;
-    onError?: (event: GPUUncapturedErrorEvent) => void;
-    onDeviceLost?: (info: GPUDeviceLostInfo) => void;
+export type DeviceConfig = DeviceDescriptor;
+
+export interface CanvasSurfaceConfig {
+	canvas: HTMLCanvasElement | OffscreenCanvas;
+	format?: GPUTextureFormat;
+	usage?: GPUTextureUsageFlags;
+	alphaMode?: GPUCanvasAlphaMode;
+	colorSpace?: PredefinedColorSpace;
 }
 
 /**
- * Resolves a GPUDevice from either a Device instance or a native GPUDevice.
- */
-export function resolveDevice(deviceOrGpu: Device | GPUDevice): GPUDevice {
-    return "device" in deviceOrGpu ? deviceOrGpu.device : deviceOrGpu;
-}
-
-/**
- * Resolves GPUQueue from Device wrapper or raw GPUDevice.
- */
-export function resolveQueue(deviceOrGpu: Device | GPUDevice): GPUQueue {
-    return "device" in deviceOrGpu ? deviceOrGpu.device.queue : deviceOrGpu.queue;
-}
-
-/**
- * Encapsulates GPU adapter negotiation, device lifetime, and swapchain presentation.
+ * Thin wrapper around a WebGPU adapter, device, and optional canvas context.
+ * All awgpu primitives accept either a `Device` wrapper or a raw `GPUDevice`.
  */
 export class Device {
-    readonly adapter: GPUAdapter;
-    readonly device: GPUDevice;
-    readonly queue: GPUQueue;
-    readonly canvas: HTMLCanvasElement | null;
-    readonly context: GPUCanvasContext | null;
-    readonly format: GPUTextureFormat;
+	readonly adapter: GPUAdapter;
+	readonly native: GPUDevice;
+	readonly format: GPUTextureFormat;
+	canvas: HTMLCanvasElement | OffscreenCanvas | null = null;
+	context: GPUCanvasContext | null = null;
+	#destroyed = false;
+	#lostInfo: GPUDeviceLostInfo | null = null;
+	readonly #lossListeners = new Set<(info: GPUDeviceLostInfo) => void>();
 
-    constructor(
-        adapter: GPUAdapter,
-        device: GPUDevice,
-        canvas: HTMLCanvasElement | null,
-        context: GPUCanvasContext | null,
-        format: GPUTextureFormat
-    ) {
-        this.adapter = adapter;
-        this.device = device;
-        this.queue = device.queue;
-        this.canvas = canvas;
-        this.context = context;
-        this.format = format;
-    }
+	private constructor(
+		adapter: GPUAdapter,
+		device: GPUDevice,
+		format: GPUTextureFormat
+	) {
+		this.adapter = adapter;
+		this.native = device;
+		this.format = format;
+	}
 
-    /**
-     * Unabstracted native GPUDevice handle.
-     */
-    get native(): GPUDevice {
-        return this.device;
-    }
+	/**
+	 * Requests a WebGPU adapter and device from `navigator.gpu`.
+	 */
+	static async create(desc: DeviceDescriptor = {}): Promise<Device> {
+		if (typeof navigator === "undefined" || !navigator.gpu) {
+			throw new Error("WebGPU is not supported in this environment (navigator.gpu is unavailable).");
+		}
 
-    /**
-     * Hardware limit capabilities negotiated for device.
-     */
-    get limits(): GPUSupportedLimits {
-        return this.device.limits;
-    }
+		const adapter = await navigator.gpu.requestAdapter({
+			powerPreference: desc.powerPreference ?? "high-performance",
+		});
 
-    /**
-     * Set of feature flags enabled on device.
-     */
-    get features(): GPUSupportedFeatures {
-        return this.device.features;
-    }
+		if (!adapter) {
+			throw new Error("Failed to acquire a compatible WebGPU adapter.");
+		}
 
-    /**
-     * Promise resolving when device disconnection occurs.
-     */
-    get lost(): Promise<GPUDeviceLostInfo> {
-        return this.device.lost;
-    }
+		const requiredFeatures: GPUFeatureName[] = [];
+		if (desc.requiredFeatures) {
+			for (const feat of desc.requiredFeatures) {
+				if (adapter.features.has(feat)) {
+					requiredFeatures.push(feat);
+				} else {
+					throw new Error(`Requested WebGPU feature '${feat}' is not supported by the adapter.`);
+				}
+			}
+		}
 
-    /**
-     * Factory: Negotiates hardware adapter, acquires GPUDevice, and configures canvas swapchain.
-     */
-    static async create(config: DeviceConfig = {}): Promise<Device> {
-        if (!navigator.gpu) {
-            throw new Error("WebGPU is not supported in this runtime environment.");
-        }
+		const nativeDevice = await adapter.requestDevice({
+			label: desc.label ?? "Awgpu_Device",
+			requiredFeatures,
+			requiredLimits: desc.requiredLimits,
+		});
 
-        const adapter = await navigator.gpu.requestAdapter({
-            powerPreference: config.powerPreference ?? "high-performance",
-        });
+		const format = navigator.gpu.getPreferredCanvasFormat
+			? navigator.gpu.getPreferredCanvasFormat()
+			: "bgra8unorm";
 
-        if (!adapter) {
-            throw new Error("Failed to acquire GPUAdapter matching requested configuration.");
-        }
+		const instance = new Device(adapter, nativeDevice, format);
 
-        const device = await adapter.requestDevice({
-            requiredFeatures: config.requiredFeatures,
-            requiredLimits: config.requiredLimits,
-        });
+		if (nativeDevice.lost) {
+			nativeDevice.lost.then((info) => {
+				instance.#lostInfo = info;
+				if (desc.onLost) {
+					desc.onLost(info);
+				}
+				for (const listener of instance.#lossListeners) {
+					try {
+						listener(info);
+					} catch {
+						// Ignore listener errors during device loss notification.
+					}
+				}
+			});
+		}
 
-        if (config.onError) {
-            device.addEventListener("uncapturederror", config.onError);
-        }
+		if (typeof nativeDevice.addEventListener === "function") {
+			nativeDevice.addEventListener("uncapturederror", (event: Event) => {
+				const gpuEvent = event as GPUUncapturedErrorEvent;
+				if (desc.onUncapturedError) {
+					desc.onUncapturedError(gpuEvent.error);
+				}
+			});
+		}
 
-        if (config.onDeviceLost) {
-            device.lost.then(config.onDeviceLost);
-        }
+		return instance;
+	}
 
-        let canvasEl: HTMLCanvasElement | null = null;
-        let ctx: GPUCanvasContext | null = null;
-        let preferredFormat: GPUTextureFormat = "rgba8unorm";
+	/**
+	 * Wraps an existing native `GPUDevice`.
+	 * Note: calling `destroy()` on a wrapped device will destroy the underlying `GPUDevice`
+	 * only if `owned` is set to true (defaults to false for `fromNative`).
+	 */
+	static fromNative(
+		device: GPUDevice,
+		adapter?: GPUAdapter,
+		format: GPUTextureFormat = "bgra8unorm",
+		options: { owned?: boolean } = {}
+	): Device {
+		const instance = new Device((adapter ?? null) as unknown as GPUAdapter, device, format);
+		instance.#owned = options.owned ?? false;
+		if (device.lost) {
+			device.lost.then((info) => {
+				instance.#lostInfo = info;
+				for (const listener of instance.#lossListeners) {
+					try {
+						listener(info);
+					} catch {
+						// Ignore listener errors.
+					}
+				}
+			});
+		}
+		return instance;
+	}
 
-        if (config.canvas) {
-            if (typeof config.canvas === "string") {
-                const el = document.querySelector(config.canvas);
-                if (!el || !(el instanceof HTMLCanvasElement)) {
-                    throw new Error(`Canvas element with selector '${config.canvas}' not found.`);
-                }
-                canvasEl = el;
-            } else {
-                canvasEl = config.canvas;
-            }
+	#owned = true;
 
-            ctx = canvasEl.getContext("webgpu");
-            if (!ctx) {
-                throw new Error("Failed to acquire WebGPU presentation context from canvas.");
-            }
+	/** True if this wrapper owns the underlying `GPUDevice` lifetime. */
+	get owned(): boolean {
+		return this.#owned;
+	}
 
-            preferredFormat = navigator.gpu.getPreferredCanvasFormat();
-            ctx.configure({
-                device,
-                format: preferredFormat,
-                alphaMode: config.alphaMode ?? "premultiplied",
-            });
-        }
+	/** True if `destroy()` has been called on this wrapper. */
+	get isDestroyed(): boolean {
+		return this.#destroyed;
+	}
 
-        return new Device(adapter, device, canvasEl, ctx, preferredFormat);
-    }
+	/** Non-null if the underlying `GPUDevice` has reported device loss. */
+	get lostInfo(): GPUDeviceLostInfo | null {
+		return this.#lostInfo;
+	}
 
-    /**
-     * Factory: Allocates a headless device omitting presentation swapchains for compute or offscreen testing.
-     */
-    static async createHeadless(config: DeviceConfig = {}): Promise<Device> {
-        return Device.create({ ...config, canvas: null });
-    }
+	/** True if the device has been destroyed or lost. */
+	get isLostOrDestroyed(): boolean {
+		return this.#destroyed || this.#lostInfo !== null;
+	}
 
-    /**
-     * Instantiates a fresh GPUCommandEncoder with optional diagnostic label.
-     */
-    createCommandEncoder(label?: string): GPUCommandEncoder {
-        return this.device.createCommandEncoder({ label });
-    }
+	/** Registers a callback invoked if the device is lost. Returns an unsubscribe function. */
+	onLost(listener: (info: GPUDeviceLostInfo) => void): () => void {
+		if (this.#lostInfo) {
+			listener(this.#lostInfo);
+			return () => {};
+		}
+		this.#lossListeners.add(listener);
+		return () => {
+			this.#lossListeners.delete(listener);
+		};
+	}
 
-    private _singleSubmitArray: [GPUCommandBuffer] = [null as unknown as GPUCommandBuffer];
+	/** Configures a canvas context for swapchain presentation. */
+	configureSurface(config: CanvasSurfaceConfig): GPUCanvasContext {
+		const ctx = config.canvas.getContext("webgpu") as GPUCanvasContext | null;
+		if (!ctx) {
+			throw new Error("Failed to acquire 'webgpu' context from canvas.");
+		}
 
-    /**
-     * Accepts a single command buffer/encoder or an array of command buffers/encoders.
-     * Encoders are automatically finalized before submission.
-     */
-    submit(commands: (GPUCommandBuffer | GPUCommandEncoder)[] | GPUCommandBuffer | GPUCommandEncoder): void {
-        if (!Array.isArray(commands)) {
-            const buf = "finish" in commands ? commands.finish() : commands;
-            this._singleSubmitArray[0] = buf;
-            this.queue.submit(this._singleSubmitArray);
-            this._singleSubmitArray[0] = null as unknown as GPUCommandBuffer;
-            return;
-        }
+		ctx.configure({
+			device: this.native,
+			format: config.format ?? this.format,
+			usage: config.usage ?? GPUTextureUsage.RENDER_ATTACHMENT,
+			alphaMode: config.alphaMode ?? "opaque",
+			colorSpace: config.colorSpace ?? "srgb",
+		});
 
-        const buffers: GPUCommandBuffer[] = new Array(commands.length);
-        for (let i = 0; i < commands.length; i++) {
-            const item = commands[i];
-            buffers[i] = "finish" in item ? item.finish() : item;
-        }
+		this.canvas = config.canvas;
+		this.context = ctx;
+		return ctx;
+	}
 
-        this.queue.submit(buffers);
-    }
+	/**
+	 * Acquires the current frame's presentation texture from the configured canvas context.
+	 * Must be called per frame/recording; presentation textures must not be cached across frames.
+	 */
+	getCurrentSurfaceTexture(): GPUTexture {
+		if (!this.context) {
+			throw new Error("No surface configured on Device. Call configureSurface() first.");
+		}
+		return this.context.getCurrentTexture();
+	}
 
-    /**
-     * Unconfigures presentation context and releases hardware device resources.
-     */
-    destroy(): void {
-        if (this.context) {
-            this.context.unconfigure();
-        }
-        this.device.destroy();
-    }
+	/**
+	 * Acquires a fresh view of the current frame's presentation texture.
+	 * Must be called per frame/recording; presentation views must not be cached across frames.
+	 */
+	getCurrentSurfaceView(): GPUTextureView {
+		return this.getCurrentSurfaceTexture().createView();
+	}
+
+	/** Native `GPUQueue` of the underlying device. */
+	get queue(): GPUQueue {
+		return this.native.queue;
+	}
+
+	/** Hardware limits of the underlying device. */
+	get limits(): GPUSupportedLimits {
+		return this.native.limits;
+	}
+
+	/** Enabled features of the underlying device. */
+	get features(): GPUSupportedFeatures {
+		return this.native.features;
+	}
+
+	/** Pushes error scopes for validation, out-of-memory, and internal errors. */
+	pushErrorScopes(): void {
+		this.native.pushErrorScope("validation");
+		this.native.pushErrorScope("out-of-memory");
+		this.native.pushErrorScope("internal");
+	}
+
+	/** Pops the 3 error scopes pushed by `pushErrorScopes()` and returns any captured errors. */
+	async popErrorScopes(): Promise<GPUError[]> {
+		const internalErr = await this.native.popErrorScope();
+		const oomErr = await this.native.popErrorScope();
+		const validationErr = await this.native.popErrorScope();
+
+		const errors: GPUError[] = [];
+		if (validationErr) errors.push(validationErr);
+		if (oomErr) errors.push(oomErr);
+		if (internalErr) errors.push(internalErr);
+		return errors;
+	}
+
+	/**
+	 * Marks this wrapper as destroyed and destroys the underlying `GPUDevice` if owned.
+	 * Idempotent.
+	 */
+	destroy(): void {
+		if (this.#destroyed) {
+			return;
+		}
+		this.#destroyed = true;
+		if (this.#owned) {
+			this.native.destroy();
+		}
+	}
+}
+
+/**
+ * Resolves either a `Device` wrapper or a raw `GPUDevice` into the native `GPUDevice`.
+ */
+export function resolveDevice(device: Device | GPUDevice): GPUDevice {
+	return device instanceof Device ? device.native : device;
+}
+
+/**
+ * Resolves either a `Device` wrapper or a raw `GPUDevice` into its `GPUQueue`.
+ */
+export function resolveQueue(device: Device | GPUDevice): GPUQueue {
+	return device instanceof Device ? device.queue : device.queue;
+}
+
+const _resourceIds = new WeakMap<object, number>();
+let _nextResourceId = 1;
+
+/**
+ * Returns a process-unique numeric identity for any GPU object or wrapper reference.
+ */
+export function getResourceId(obj: object): number {
+	let id = _resourceIds.get(obj);
+	if (id === undefined) {
+		id = _nextResourceId++;
+		_resourceIds.set(obj, id);
+	}
+	return id;
 }

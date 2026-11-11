@@ -5,120 +5,146 @@
 import { WasmMemory } from "./wasm-memory.js";
 
 /**
- * Detachment-resilient typed array accessors over WebAssembly linear memory.
- * Caches buffer references and revalidates views against WasmMemory generation counters
- * to prevent accessing detached ArrayBuffers following memory expansion.
+ * Typed-array and DataView factory over `WasmMemory`.
+ *
+ * Borrowed view lifetime contract:
+ * - Each `as*` method refreshes the underlying `WasmMemory` buffer reference and constructs a new view
+ *   over the current `ArrayBuffer` or `SharedArrayBuffer`.
+ * - Previously returned typed arrays cannot be updated in place after memory growth: on non-shared
+ *   `WebAssembly.Memory`, growth detaches the prior `ArrayBuffer`; on shared `WebAssembly.Memory`,
+ *   prior views remain bound to the older, shorter `SharedArrayBuffer`. Always re-acquire views via
+ *   `MemoryView` after any operation that may grow linear memory.
  */
 export class MemoryView {
-    private readonly _memory: WasmMemory;
-    private _cachedGeneration: number;
-    private _cachedBuffer: ArrayBuffer;
+	readonly #memory: WasmMemory;
+	#cachedGeneration: number;
+	#cachedBuffer: ArrayBuffer;
+	#cachedByteLength: number;
 
-    constructor(memory: WasmMemory) {
-        this._memory = memory;
-        this._cachedGeneration = memory.generation;
-        this._cachedBuffer = memory.buffer;
-    }
+	constructor(memory: WasmMemory) {
+		this.#memory = memory;
+		this.#cachedBuffer = memory.buffer;
+		this.#cachedByteLength = memory.byteLength;
+		this.#cachedGeneration = memory.generation;
+	}
 
-    private resolveBuffer(): ArrayBuffer {
-        if (this._cachedGeneration !== this._memory.generation) {
-            this._cachedBuffer = this._memory.buffer;
-            this._cachedGeneration = this._memory.generation;
-        }
-        return this._cachedBuffer;
-    }
+	#resolveBuffer(): ArrayBuffer {
+		this.#memory.refresh();
+		const gen = this.#memory.generation;
+		const buf = this.#memory.buffer;
+		const byteLen = buf.byteLength;
+		if (
+			this.#cachedGeneration !== gen ||
+			this.#cachedBuffer !== buf ||
+			this.#cachedByteLength !== byteLen
+		) {
+			this.#cachedBuffer = buf;
+			this.#cachedByteLength = byteLen;
+			this.#cachedGeneration = gen;
+		}
+		return this.#cachedBuffer;
+	}
 
-    /**
-     * Slices an 8-bit unsigned integer view over linear memory.
-     */
-    public asUint8(byteOffset: number, length: number): Uint8Array {
-        const buffer = this.resolveBuffer();
-        return new Uint8Array(buffer, byteOffset, length);
-    }
+	#validateSpan(
+		byteOffset: number,
+		elementCount: number,
+		bytesPerElement: number,
+		typeName: string
+	): ArrayBuffer {
+		if (!Number.isSafeInteger(byteOffset) || byteOffset < 0) {
+			throw new RangeError(`${typeName} byteOffset must be a non-negative integer, received ${byteOffset}.`);
+		}
+		if (!Number.isSafeInteger(elementCount) || elementCount < 0) {
+			throw new RangeError(`${typeName} length must be a non-negative integer, received ${elementCount}.`);
+		}
+		if (bytesPerElement > 1 && byteOffset % bytesPerElement !== 0) {
+			throw new RangeError(
+				`${typeName} byteOffset must be ${bytesPerElement}-byte aligned, received ${byteOffset}.`
+			);
+		}
+		const buffer = this.#resolveBuffer();
+		const byteLength = elementCount * bytesPerElement;
+		if (byteOffset + byteLength > buffer.byteLength) {
+			throw new RangeError(
+				`${typeName} span [${byteOffset}, ${byteOffset + byteLength}) exceeds memory byteLength (${buffer.byteLength}).`
+			);
+		}
+		return buffer;
+	}
 
-    /**
-     * Slices an 8-bit signed integer view over linear memory.
-     */
-    public asInt8(byteOffset: number, length: number): Int8Array {
-        const buffer = this.resolveBuffer();
-        return new Int8Array(buffer, byteOffset, length);
-    }
+	/**
+	 * Creates a borrowed `Uint8Array` view over `[byteOffset, byteOffset + length)`.
+	 */
+	asUint8(byteOffset: number, length: number): Uint8Array {
+		const buffer = this.#validateSpan(byteOffset, length, 1, "Uint8");
+		return new Uint8Array(buffer, byteOffset, length);
+	}
 
-    /**
-     * Slices a 16-bit signed integer view over linear memory. Requires 2-byte alignment.
-     */
-    public asInt16(byteOffset: number, length: number): Int16Array {
-        if ((byteOffset & 1) !== 0) {
-            throw new Error(`Int16 offset must be 2-byte aligned, received ${byteOffset}`);
-        }
-        const buffer = this.resolveBuffer();
-        return new Int16Array(buffer, byteOffset, length);
-    }
+	/**
+	 * Creates a borrowed `Int8Array` view over `[byteOffset, byteOffset + length)`.
+	 */
+	asInt8(byteOffset: number, length: number): Int8Array {
+		const buffer = this.#validateSpan(byteOffset, length, 1, "Int8");
+		return new Int8Array(buffer, byteOffset, length);
+	}
 
-    /**
-     * Slices a 16-bit unsigned integer view over linear memory. Requires 2-byte alignment.
-     */
-    public asUint16(byteOffset: number, length: number): Uint16Array {
-        if ((byteOffset & 1) !== 0) {
-            throw new Error(`Uint16 offset must be 2-byte aligned, received ${byteOffset}`);
-        }
-        const buffer = this.resolveBuffer();
-        return new Uint16Array(buffer, byteOffset, length);
-    }
+	/**
+	 * Creates a borrowed `Int16Array` view over `[byteOffset, byteOffset + length * 2)`. Requires 2-byte alignment.
+	 */
+	asInt16(byteOffset: number, length: number): Int16Array {
+		const buffer = this.#validateSpan(byteOffset, length, 2, "Int16");
+		return new Int16Array(buffer, byteOffset, length);
+	}
 
-    /**
-     * Slices a 32-bit signed integer view over linear memory. Requires 4-byte alignment.
-     */
-    public asInt32(byteOffset: number, length: number): Int32Array {
-        if ((byteOffset & 3) !== 0) {
-            throw new Error(`Int32 offset must be 4-byte aligned, received ${byteOffset}`);
-        }
-        const buffer = this.resolveBuffer();
-        return new Int32Array(buffer, byteOffset, length);
-    }
+	/**
+	 * Creates a borrowed `Uint16Array` view over `[byteOffset, byteOffset + length * 2)`. Requires 2-byte alignment.
+	 */
+	asUint16(byteOffset: number, length: number): Uint16Array {
+		const buffer = this.#validateSpan(byteOffset, length, 2, "Uint16");
+		return new Uint16Array(buffer, byteOffset, length);
+	}
 
-    /**
-     * Slices a 32-bit unsigned integer view over linear memory. Requires 4-byte alignment.
-     */
-    public asUint32(byteOffset: number, length: number): Uint32Array {
-        if ((byteOffset & 3) !== 0) {
-            throw new Error(`Uint32 offset must be 4-byte aligned, received ${byteOffset}`);
-        }
-        const buffer = this.resolveBuffer();
-        return new Uint32Array(buffer, byteOffset, length);
-    }
+	/**
+	 * Creates a borrowed `Int32Array` view over `[byteOffset, byteOffset + length * 4)`. Requires 4-byte alignment.
+	 */
+	asInt32(byteOffset: number, length: number): Int32Array {
+		const buffer = this.#validateSpan(byteOffset, length, 4, "Int32");
+		return new Int32Array(buffer, byteOffset, length);
+	}
 
-    /**
-     * Slices a 32-bit floating point view over linear memory. Requires 4-byte alignment.
-     */
-    public asFloat32(byteOffset: number, length: number): Float32Array {
-        if ((byteOffset & 3) !== 0) {
-            throw new Error(`Float32 offset must be 4-byte aligned, received ${byteOffset}`);
-        }
-        const buffer = this.resolveBuffer();
-        return new Float32Array(buffer, byteOffset, length);
-    }
+	/**
+	 * Creates a borrowed `Uint32Array` view over `[byteOffset, byteOffset + length * 4)`. Requires 4-byte alignment.
+	 */
+	asUint32(byteOffset: number, length: number): Uint32Array {
+		const buffer = this.#validateSpan(byteOffset, length, 4, "Uint32");
+		return new Uint32Array(buffer, byteOffset, length);
+	}
 
-    /**
-     * Slices a 64-bit floating point view over linear memory. Requires 8-byte alignment.
-     */
-    public asFloat64(byteOffset: number, length: number): Float64Array {
-        if ((byteOffset & 7) !== 0) {
-            throw new Error(`Float64 offset must be 8-byte aligned, received ${byteOffset}`);
-        }
-        const buffer = this.resolveBuffer();
-        return new Float64Array(buffer, byteOffset, length);
-    }
+	/**
+	 * Creates a borrowed `Float32Array` view over `[byteOffset, byteOffset + length * 4)`. Requires 4-byte alignment.
+	 */
+	asFloat32(byteOffset: number, length: number): Float32Array {
+		const buffer = this.#validateSpan(byteOffset, length, 4, "Float32");
+		return new Float32Array(buffer, byteOffset, length);
+	}
 
-    /**
-     * Slices a DataView window over linear memory.
-     */
-    public asDataView(byteOffset: number, byteLength: number): DataView {
-        const buffer = this.resolveBuffer();
-        return new DataView(buffer, byteOffset, byteLength);
-    }
+	/**
+	 * Creates a borrowed `Float64Array` view over `[byteOffset, byteOffset + length * 8)`. Requires 8-byte alignment.
+	 */
+	asFloat64(byteOffset: number, length: number): Float64Array {
+		const buffer = this.#validateSpan(byteOffset, length, 8, "Float64");
+		return new Float64Array(buffer, byteOffset, length);
+	}
 
-    public get memory(): WasmMemory {
-        return this._memory;
-    }
+	/**
+	 * Creates a borrowed `DataView` window over `[byteOffset, byteOffset + byteLength)`.
+	 */
+	asDataView(byteOffset: number, byteLength: number): DataView {
+		const buffer = this.#validateSpan(byteOffset, byteLength, 1, "DataView");
+		return new DataView(buffer, byteOffset, byteLength);
+	}
+
+	get memory(): WasmMemory {
+		return this.#memory;
+	}
 }

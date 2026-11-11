@@ -1,6 +1,6 @@
 # Adiag
 
-Structured diagnostic collector, telemetry bus, and causal error tracer. Replaces cross-boundary thrown exceptions with queryable records, bounded ring-buffer history, and pointer-based causal error chains.
+Structured diagnostic collector, telemetry bus, and causal error tracer. Provides bounded ring-buffer history, subscriber error isolation, and ID-linked causal chain traversal.
 
 ---
 
@@ -8,131 +8,90 @@ Structured diagnostic collector, telemetry bus, and causal error tracer. Replace
 
 Adiag structures diagnostics across three core primitives:
 
-1. `Result`: Diagnostic record with category type, machine-readable code, template text, payload data, and causal reference pointer.
-2. `Bus`: Diagnostic telemetry bus backed by a fixed-capacity circular ring buffer.
-3. Causal chain tracer: Traversal functions generating root cause failure traces across subsystem boundaries.
+1. `Diagnostic<T>`: Immutable diagnostic record with numeric `id`, `category`, `severity` (`"info"`, `"warn"`, `"error"`), `timestamp`, `message`, optional `data`, and optional causal parent `causeId`.
+2. `Bus`: Diagnostic telemetry bus backed by a bounded circular ring buffer with isolated subscriber dispatch.
+3. Causal chain tracing: `bus.trace()` traverses `causeId` links across retained history while guarding against cycles, evicted ancestors, and `maxCausalDepth`.
 
 ---
 
 ## 1. Diagnostic Records and Logging
 
-`Result` captures structured diagnostics. `Bus` logs records into a pre-allocated circular ring buffer in O(1) time without unbounded memory growth.
+`Bus` emits `Diagnostic` records, stores them in a bounded ring buffer (default `maxHistory = 256`, or `0` to disable history retention while still notifying live subscribers), and dispatches each record to registered subscribers.
 
 ```typescript
-import { Bus, type Result } from "./index.js";
+import { Bus, type Diagnostic } from "@asciiz/atoolkit/adiag";
 
-const bus = new Bus(1000);
+const bus = new Bus({ maxHistory: 256 });
 
-// Basic logging
-bus.ok({ code: "RENDER_INIT_OK" });
+// Info diagnostic
+bus.info("RENDER_INIT_OK", { backend: "webgpu" });
 
-// Warning with template parameters
-bus.warn({
-    code: "FALLBACK_FORMAT",
-    raw: "Target format '$format$' unsupported; using fallback",
-    data: { format: "depth32float" },
+// Warning diagnostic
+bus.warn("FALLBACK_FORMAT", { format: "depth24plus" });
+
+// Error diagnostic
+const fileErr: Diagnostic<{ path: string }> = bus.error("FILE_NOT_FOUND", {
+	path: "models/mesh.bin",
 });
-
-// Error with structured payload
-const fileErr = bus.err({
-    code: "FILE_NOT_FOUND",
-    raw: "Resource '$path$' could not be located",
-    data: { path: "models/mesh.bin" },
-});
+void fileErr;
 ```
 
-- Storage layout: Pre-allocated `#buffer: (Result | null)[]` of length `maxHistory` (default 1000). `#head` tracks the circular insertion index and `#count` tracks total active records. Once `maxHistory` is reached, subsequent additions overwrite the oldest slots in O(1).
-- `ok(args)` / `err(args)` / `warn(args)` / `info(args)`: Appends record with corresponding category type (`"ok"`, `"err"`, `"warn"`, `"info"`), returns the created `Result` instance.
-- `results`: Getter returning chronological snapshot array ordered from oldest active record to newest.
-- `clear()`: Resets `#head` and `#count` to 0 and clears backing buffer slots.
+- Constructor options (`BusOptions`):
+  - `maxHistory?: number`: Maximum retained records in the ring buffer (must be a non-negative integer; defaults to `256`). When `maxHistory === 0`, no history is retained in memory.
+  - `maxCausalDepth?: number`: Maximum number of links traversed by `trace()` (must be a positive integer; defaults to `64`).
+  - `onSubscriberError?: (error: unknown, diagnostic: Diagnostic) => void`: Optional handler invoked when a subscriber throws during event dispatch.
+- `emit(category, message, data?, cause?, severity?)`: Creates a frozen `Diagnostic` record, appends it to bounded history if `maxHistory > 0`, notifies subscribers, and returns the record.
+- `info(message, data?, cause?)` / `warn(message, data?, cause?)` / `error(message, data?, cause?)`: Severity convenience helpers.
+- `size`: Current number of diagnostics retained in the history buffer.
+- `history()`: Returns a chronological array snapshot ordered from oldest retained record to newest.
+- `getById(id)`: Looks up a retained diagnostic by its numeric `id` in O(1).
+- `clear()`: Clears retained history and ID lookup index.
 
 ---
 
-## 2. Causal Error Reference Chaining
+## 2. Subscriber Isolation
 
-High-level failures link directly to low-level root causes via the `ref` causal reference pointer.
+Subscribers receive live diagnostics via `bus.on(subscriber)`. If a subscriber throws, `Bus` catches the exception, forwards it to `onSubscriberError` (if configured), and continues delivering the diagnostic to all remaining subscribers.
 
 ```typescript
-import { Bus } from "./index.js";
+import { Bus } from "@asciiz/atoolkit/adiag";
+
+const capturedErrors: unknown[] = [];
+const capturedLogs: string[] = [];
+
+const bus = new Bus({
+	onSubscriberError: (err, diag) => {
+		capturedErrors.push({ id: diag.id, err });
+	},
+});
+
+const unsubscribe = bus.on((diag) => {
+	capturedLogs.push(`[${diag.severity}] ${diag.message}`);
+});
+
+bus.info("SYSTEM_READY");
+unsubscribe();
+```
+
+---
+
+## 3. Causal Error Reference Chaining
+
+Downstream failures link to upstream root causes via the `cause` parameter (which accepts either a parent `Diagnostic` object or a numeric diagnostic ID).
+
+```typescript
+import { Bus } from "@asciiz/atoolkit/adiag";
 
 const bus = new Bus();
 
-// Root cause: low-level hardware or file failure
-const hardwareErr = bus.err({
-    code: "BUFFER_CREATION_FAILED",
-    raw: "Failed to allocate uniform buffer of size $size$ bytes",
-    data: { size: 1048576 },
-});
+const rootErr = bus.error("BUFFER_ALLOC_FAILED", { requestedBytes: 1048576 });
+const passErr = bus.error("PASS_EXEC_FAILED", { pass: "GBuffer" }, rootErr);
+const frameErr = bus.emit("fatal", "FRAME_ABORTED", { frame: 42 }, passErr.id, "error");
 
-// High-level failure: points to underlying cause via ref
-const pipelineErr = bus.err({
-    code: "PIPELINE_INIT_FAILED",
-    raw: "Failed to initialize pipeline '$name$'",
-    data: { name: "ForwardRenderer" },
-    ref: hardwareErr, // Causal link
-});
-
-// Print formatted causal trace
-console.log(Bus.resultToChainMsg(pipelineErr));
-// Output:
-// Failed to initialize pipeline 'ForwardRenderer'
-//   -> Caused by: Failed to allocate uniform buffer of size 1048576 bytes
+// Ordered from earliest retained root cause to entryOrId:
+// [rootErr, passErr, frameErr]
+const chain = bus.trace(frameErr);
+void chain;
 ```
 
-- `Result.ref`: Optional pointer to another `Result` instance, linking downstream orchestrator failures directly to upstream cause.
-- `Bus.getCauseChain(result)`: Traverses `ref` pointers into an ordered array starting at `result` down to the root cause. Uses a `Set<Result>` to detect and break circular references safely.
-- `Bus.resultToChainMsg(result)`: Formats the entire causal chain into an indented, multi-line error trace:
-  ```
-  Top-level failure message
-    -> Root cause failure message
-  ```
-
----
-
-## 3. Telemetry Queries and Inspection
-
-`Bus` provides non-allocating backward-scanning inspection methods.
-
-```typescript
-import { Bus } from "./index.js";
-
-const bus = new Bus();
-
-// Fast status checks
-const isClean = bus.allOk();    // true if no errors, warnings, or info
-const hasErrors = bus.hasErrs(); // true if at least one error exists
-const latestErr = bus.lastErr(); // Retrieves newest error record without allocating arrays
-
-// Filtered array queries
-const allErrors = bus.findErrs();
-const allWarnings = bus.findWarns();
-```
-
-- `last()`: Returns the most recently logged record in O(1).
-- `lastErr()`: Scans backwards from current `#head` index to find the most recent record with `type === "err"`. Returns `null` if no errors exist, operating without allocating intermediate arrays.
-- `hasErrs()` / `hasWarns()` / `hasInfos()`: Scans backwards from `#head` to check for the presence of specific record types without allocating arrays.
-- `allOk()`: Scans backward through active records, returning `false` immediately if any record possesses a type other than `"ok"`.
-- `findErrs()` / `findWarns()` / `findInfos()` / `findOk()`: Filters `results` returning arrays of matching category records.
-
----
-
-## 4. Message Template Compilation
-
-`compileMsg` compiles `$key$` and dot-nested `$key.subkey$` placeholders against structured `data` objects.
-
-```typescript
-import { Bus } from "./index.js";
-
-const message = Bus.compileMsg(
-    "Shader module '$shader.label$' failed at line $line$:$col$",
-    {
-        shader: { label: "MainVS" },
-        line: 42,
-        col: 10,
-    }
-);
-// "Shader module 'MainVS' failed at line 42:10"
-```
-
-- `Bus.compileMsg(raw, data)`: Evaluates string templates by matching token patterns `/\$([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\$/g`. Traverses dot-nested property paths on `data`. Automatically extracts `Error.message`, handles primitives, and falls back to JSON serialization for objects.
-- `Bus.resultToMsg(result)`: Convenience method compiling `result.raw` against `result.data`.
+- `trace(entryOrId)`: Follows `causeId` links through retained history and returns `[root, ..., parent, entry]`. Stops cleanly if an ancestor has been evicted from the bounded ring buffer, if a cycle is encountered, or if `maxCausalDepth` is reached.

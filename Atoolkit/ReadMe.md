@@ -10,13 +10,13 @@ All modules share common engineering invariants: zero-allocation calling convent
 
 | Package | Role | Core Data Structures | Performance & Memory Invariants |
 | :--- | :--- | :--- | :--- |
-| **[`aecs`](./aecs/ReadMe.md)** | Entity Component System | `Entity`, `EntityPool`, `ComponentSet<T>`, `FloatSet`, `Query`, `QueryBuilder`, `query2`, `query3` | Contiguous packed dense arrays; generational slot recycling; cardinality-driven smallest-set iteration; zero hot-path allocations. |
+| **[`aecs`](./aecs/ReadMe.md)** | Entity Component System | `Entity`, `EntityPool`, `ComponentSet<T>`, `FloatSet`, `Query` | Contiguous packed dense arrays; generational slot recycling; cardinality-driven smallest-set iteration; zero hot-path allocations. |
 | **[`alm`](./alm/ReadMe.md)** | 3D Linear Algebra & Spatial Math | `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3`, `Mat4`, `Ray`, `Plane`, `AABB`, `Frustum` | Direct subclassing of native `Float32Array`; in-place fluent operations; out-parameter zero-allocation conventions. |
 | **[`atempo`](./atempo/ReadMe.md)** | Temporal Orchestration & Cadence | `Track`, `FloatTrack`, `Vec3Track`, `Curve`, `Clip`, `Cadence`, `FixedCadence`, `Spring`, `Phase`, `Metronome` | Contiguous double-precision timestamps; cached O(1) interval lookup; closed-form 2nd-order analytical spring solvers. |
-| **[`acircuit`](./acircuit/ReadMe.md)** | Directed Computation Circuit | `Socket`, `Wire`, `Chip`, `Circuit`, `Subcircuit` | Kahn topological ordering; execution plan caching (`_cachedPlan`); 1-to-1 input enforcement; 1-to-N output fan-out. |
-| **[`awgpu`](./awgpu/ReadMe.md)** | Six-Tier WebGPU Hardware Engine | `Device`, `Buffer`, `BufferPool`, `Texture`, `Sampler`, `StreamSet`, `Target`, `BindLayout`, `BindTable`, `RasterPipeline`, `ComputePipeline`, `PipelineCache`, `RenderPassNode`, `ComputePassNode`, `PassSequence`, `PassGraph` | Zero-allocation render pass descriptors; transient buffer pooling; automated vertex strides; 8-slot bind group filtering; DAG dead pass culling. |
-| **[`adiag`](./adiag/ReadMe.md)** | Diagnostic Telemetry Bus | `Bus`, `Result`, causal chain tracers | Fixed-capacity circular ring buffer (default 1000 records); non-throwing diagnostics; pointer-based causal error chains (`ref`). |
-| **[`awasm`](./awasm/ReadMe.md)** | WebAssembly Computational Runtime & Memory Coordinator | `WasmMemory`, `LinearArena`, `BlockPool`, `MemoryView`, `StructLayout`, `Slice`, `StringBuffer`, `ModuleInspector`, `HostBridge`, `ModuleLoader`, `WasmInstance`, `SharedMemory`, `AtomicQueue`, `WorkerPool` | Monotonic bump allocation; detachment-resilient typed views; 16-byte SIMD alignment; intrusive slab recycling; lock-free atomic queues. |
+| **[`acircuit`](./acircuit/ReadMe.md)** | Directed Computation Circuit | `Socket`, `Wire`, `Chip`, `Circuit`, `CompositeChip` | Kahn topological ordering; execution plan caching; 1-to-1 input enforcement; 1-to-N output fan-out. |
+| **[`awgpu`](./awgpu/ReadMe.md)** | Six-Tier WebGPU Hardware Engine | `Device`, `Buffer`, `BufferPool`, `Texture`, `Sampler`, `StreamSet`, `Target`, `BindLayout`, `BindTable`, `BindTableCache`, `RasterPipeline`, `ComputePipeline`, `PipelineCache`, `RenderPassNode`, `ComputePassNode`, `PassSequence`, `PassGraph` | Zero-allocation render pass descriptors; transient buffer pooling; automated vertex strides; 8-slot bind group filtering; DAG dead pass culling. |
+| **[`adiag`](./adiag/ReadMe.md)** | Diagnostic Telemetry Bus | `Bus`, `Diagnostic`, `DiagnosticSeverity` | Fixed-capacity circular ring buffer (default 256 records); subscriber error isolation; causal chain tracing (`causeId`). |
+| **[`awasm`](./awasm/ReadMe.md)** | WebAssembly Computational Runtime & Memory Coordinator *(Runtime/Concurrency Experimental)* | `WasmMemory`, `LinearArena`, `BlockPool`, `MemoryView`, `StructLayout`, `Slice`, `StringBuffer`, `ModuleInspector`, `HostBridge`, `ModuleLoader`, `WasmInstance`, `SharedMemory`, `AtomicQueue`, `WorkerPool` | Monotonic bump allocation; detachment-resilient typed views; 16-byte SIMD alignment; bitmap-guarded slab recycling; lock-free SPSC atomic queues. |
 
 ---
 
@@ -26,11 +26,11 @@ All modules share common engineering invariants: zero-allocation calling convent
 
 High-performance, sets-first ECS decoupled from rigid scene graphs.
 
-- **Entity Allocation**: `Entity` packs a 20-bit slot index and a 12-bit generation counter into a single integer. `EntityPool` manages issuance, generational validation, and slot recycling via an internal free-list array.
+- **Entity Allocation**: `Entity` packs a 20-bit slot index, an 11-bit generation counter, and a 1-bit alive flag into an unsigned 32-bit integer. `EntityPool` manages issuance, generational validation, slot retirement on generation exhaustion, and slot recycling via an internal free-list array.
 - **Dense Storage Primitives**:
   - `ComponentSet<T>`: Contiguous sparse-dense storage for JavaScript objects, state tags, and reference payloads.
   - `FloatSet`: Contiguous packed `Float32Array` storage for high-frequency numeric vectors and matrices, eliminating object reference overhead.
-- **Cardinality Joins**: `Query`, `QueryBuilder`, `query2()`, and `query3()` identify smallest active component set and iterate only across that driver set, testing presence in secondary sets in O(1) time with zero hot-path allocations.
+- **Cardinality Joins**: `Query` identifies the smallest required component set and iterates only across that pivot set, testing presence in secondary and excluded sets in O(1) time with zero view allocations via `forEachEntity()`.
 
 ### 2.2 alm: 3D Linear Algebra & Spatial Primitives
 
@@ -57,36 +57,36 @@ Value computation graph featuring static topology validation and plan caching.
 
 - **Endpoints & Connections**: `Socket` declares input or output endpoints with optional data type constraints and requirement tags. `Wire` defines directed connections linking an output socket to an input socket. Input sockets strictly enforce 1-to-1 connections; output sockets support 1-to-N fan-out.
 - **Computation Units**: `Chip` represents a stateless computational node that declares socket schemas and evaluates input records.
-- **Graph Ownership**: `Circuit` validates connections against cycles and missing required inputs, derives topological evaluation sequences via Kahn's algorithm, and caches the resulting execution plan (`_cachedPlan`).
-- **Composite Encapsulation**: `Subcircuit` wraps an entire circuit inside a single composite chip, mapping boundary sockets and enabling hierarchical composition.
+- **Graph Ownership**: `Circuit` validates connections against cycles and type mismatches, derives topological evaluation sequences via Kahn's algorithm, and caches the resulting execution plan by structural revision.
+- **Composite Encapsulation**: `CompositeChip` wraps an entire subcircuit inside a single composite chip, exposing boundary sockets (`exposeInput`, `exposeOutput`) and flattening into parent circuits (`flattenInto`) via `ChipProxy` instances.
 
 ### 2.5 awgpu: Six-Tier WebGPU Hardware Engine
 
 Domain-agnostic WebGPU execution engine built across six distinct compositional levels:
 
-- **Level 0 (Hardware Foundation)**: `Device` acquires adapters, logical devices, and queue handles. Exposes hardware telemetry (`limits`, `features`, `lost`) and attaches error hooks (`onError`, `onDeviceLost`).
-- **Level 1 (Managed Memory)**: `Buffer` encapsulates sized allocations and uniform alignment. `BufferPool` recycles transient buffers across frames via power-of-two size bucketing. `Texture` handles 256-byte aligned row stride calculations (`write2D`) and external image copy (`copyExternalImage`). `Sampler` configures filtering and shadow comparison modes.
-- **Level 2 (Data Structures)**: `StreamSet` groups planar or interleaved vertex attributes and index streams, automatically deriving 4-byte aligned vertex buffer layouts. `Target` manages swapchain backbuffers, offscreen multi-render-targets (MRT), MSAA resolution, and cached render pass descriptors. `SwapBuffer` manages ping-pong buffer pointers in O(1) time.
-- **Level 3 (Resource Binding)**: `BindLayoutBuilder` constructs `GPUBindGroupLayout` descriptors with fluent method chaining. `BindTable` normalizes raw or wrapped resources into native binding descriptors. `BindTableCache` automatically deduplicates identical bind groups via deterministic composite hashing.
-- **Level 4 (Hardware Pipelines)**: `RasterPipeline` and `ComputePipeline` compile shader modules with synchronous and asynchronous factory methods. `PipelineCache` provides deterministic 32-bit FNV-1a descriptor hashing and cached retrieval.
-- **Level 5 (Command Sequencing & DAG)**: `RenderPassNode` and `ComputePassNode` record commands while filtering redundant driver state changes (tracking 8 bind group slots, vertex buffers, and index buffers). `PassGraph` schedules passes via Kahn topological sort, resolving read/write hazards and eliminating dead passes via reverse reachability from side-effect roots.
+- **Level 0 (Hardware Foundation)**: `Device` acquires adapters, logical devices, and queue handles, or wraps borrowed native `GPUDevice` handles via `Device.fromNative`. Exposes hardware telemetry (`limits`, `features`, `lost`) and attaches error hooks (`onError`, `onDeviceLost`).
+- **Level 1 (Managed Memory)**: `Buffer` encapsulates sized allocations, 4-byte aligned uploads (`write`, `writePadded`), uniform alignment, and safe staging readbacks (`readback`). `BufferPool` recycles transient buffers across frames via power-of-two size bucketing. `Texture` manages 2D and depth/stencil textures (`create2D`, `createDepth`), validates tight or custom-stride 2D uploads (`write2D` via `queue.writeTexture`), and caches default views per native `GPUTexture`. `Sampler` configures texture filtering and addressing modes (`Sampler.create`).
+- **Level 2 (Data Structures)**: `StreamSet` groups planar or interleaved vertex attributes and index streams, automatically deriving vertex buffer layouts. `Target` manages swapchain backbuffers, offscreen multi-render-targets (MRT), MSAA resolution, read-only attachment inspection snapshots, and cached render pass descriptors. `SwapBuffer` manages ping-pong resource pairs in O(1) time.
+- **Level 3 (Resource Binding)**: `BindLayoutBuilder` constructs `GPUBindGroupLayout` descriptors with fluent method chaining. `BindTable` normalizes raw or wrapped resources into native binding descriptors. `BindTableCache` provides device-scoped LRU caching and resource-targeted eviction (`evictResource`).
+- **Level 4 (Hardware Pipelines)**: `RasterPipeline` and `ComputePipeline` compile shader modules with synchronous and asynchronous factory methods. `PipelineCache` provides device-scoped normalized descriptor caching and in-flight async compilation deduplication.
+- **Level 5 (Command Sequencing & DAG)**: `RenderPassNode` and `ComputePassNode` record commands while filtering redundant driver state changes (tracking bind group slots, vertex buffer ranges, and index buffer ranges). `PassGraph` schedules passes via Kahn topological sort, resolving RAW/WAR/WAW hazards and eliminating dead passes via reverse reachability from side-effect or presentation roots.
 
 ### 2.6 adiag: Diagnostic Telemetry Bus
 
-Structured diagnostics and causal error tracing without cross-boundary thrown exceptions.
+Structured diagnostics, subscriber dispatch, and causal error tracing without cross-boundary thrown exceptions.
 
-- **Structured Records**: `Result` captures category types (`"ok"`, `"err"`, `"warn"`, `"info"`), machine-readable codes, templated messages, arbitrary key-value payloads, and parent error references (`ref`).
-- **Circular History**: `Bus` logs diagnostic records into a pre-allocated circular ring buffer (default 1000 entries) in O(1) time, overwriting oldest records when capacity is reached.
-- **Causal Traversal**: Tracing utilities traverse parent `ref` pointers to extract chronological root cause failure chains across asynchronous subsystem boundaries.
+- **Structured Records**: `Diagnostic<T>` captures numeric IDs, category tags, severity levels (`"info"`, `"warn"`, `"error"`), messages, timestamps, optional structured payloads (`data`), and optional causal parent IDs (`causeId`).
+- **Circular History**: `Bus` logs diagnostic records into a bounded circular ring buffer (default 256 entries, or `0` for stateless streaming) in O(1) time, overwriting the oldest records when capacity is reached.
+- **Causal Traversal**: `bus.trace()` traverses `causeId` links to extract root-cause failure chains across subsystem boundaries while guarding against cycles and evicted ancestors.
 
 ### 2.7 awasm: WebAssembly Computational Runtime & Linear Memory Coordinator
 
-Low-level WebAssembly execution runtime, linear memory arena coordinator, binary inspector, and multi-threaded worker dispatch framework.
+Low-level WebAssembly execution runtime, linear memory arena coordinator, binary inspector, and multi-threaded worker dispatch framework. Runtime and concurrency primitives (`ModuleLoader`, `HostBridge`, `WasmInstance`, `SharedMemory`, `AtomicQueue`, `WorkerPool`) are marked **experimental**.
 
-- **Memory Subsystem**: `WasmMemory` tracks page growth and notifies listeners when native buffers detach. `LinearArena` provides O(1) bump allocations with 4/8/16-byte alignment and watermark rewinding. `BlockPool` manages intrusive free-list slab recycling. `MemoryView` exposes detachment-resilient typed array views.
+- **Memory Subsystem**: `WasmMemory` tracks wrapper, native, and guest-initiated page growth and notifies listeners when native buffers detach. `LinearArena` provides fixed-capacity O(1) bump allocations with power-of-two alignment and watermark rewinding. `BlockPool` manages bitmap-guarded free-list slab recycling. `MemoryView` exposes detachment-resilient typed array views.
 - **ABI Subsystem**: `StructLayout` computes member byte offsets and stride calculations matching C/Rust `repr(C)` specifications. `Slice` encapsulates guest memory spans `(ptr, length)` without buffer duplication. `StringBuffer` provides UTF-8 encoding into arena memory and decoding from guest spans.
-- **Runtime Subsystem**: `ModuleInspector` performs static binary analysis on uninstantiated modules. `HostBridge` constructs typed host import tables with standard timing and panic hooks. `ModuleLoader` compiles modules via streaming or buffered paths with optional IndexedDB bytecode caching. `WasmInstance` manages active instances with dual-tier native handle access.
-- **Thread Subsystem**: `SharedMemory` allocates thread-safe `SharedArrayBuffer` memory with 32-bit atomic wait/notify synchronization. `AtomicQueue` coordinates lock-free message passing via circular ring buffers. `WorkerPool` dispatches tasks across dedicated Web Workers sharing the same compiled module and linear memory.
+- **Runtime Subsystem (Experimental)**: `ModuleInspector` performs static binary analysis on uninstantiated modules. `HostBridge` constructs typed host import tables with UTF-8 logging and panic hooks. `ModuleLoader` compiles modules via streaming or buffered paths with optional IndexedDB caching. `WasmInstance` manages active instances with optional or required linear memory handles.
+- **Thread Subsystem (Experimental)**: `SharedMemory` allocates thread-safe `SharedArrayBuffer` memory with 32-bit atomic wait/notify synchronization. `AtomicQueue` coordinates lock-free single-producer / single-consumer (SPSC) message passing via unsigned 32-bit ring indices. `WorkerPool` dispatches tasks across Web Workers with configurable backpressure, timeouts, and cancellation.
 
 ---
 
@@ -100,10 +100,10 @@ Low-level WebAssembly execution runtime, linear memory arena coordinator, binary
    - `aecs` stores component values and entity keys in packed, contiguous arrays (`ComponentSet`, `FloatSet`). Iterations execute directly over dense memory blocks without pointer-chasing scene graphs.
 
 3. **Four-Tier Bind Frequency Slots**:
-   - `awgpu` standardizes pipeline bindings into four update frequencies (`PerFrame = 0`, `PerPhase = 1`, `PerBatch = 2`, `PerInstance = 3`), filtering redundant GPU driver state updates between draws.
+   - `awgpu` standardizes pipeline bindings into four update frequencies (`PerFrame = 0`, `PerPass = 1`, `PerBatch = 2`, `PerInstance = 3`), filtering redundant GPU driver state updates between draws.
 
 4. **Deterministic Plan Caching**:
-   - Both `acircuit` and `awgpu` cache topological execution orders (`_cachedPlan` in `Circuit`, `_cachedSequence` in `PassGraph`), executing in O(1) time across subsequent frames unless graph topology is explicitly invalidated.
+   - Both `acircuit` and `awgpu` cache topological execution orders (`Circuit.topoSort()` and `PassGraph.compile()`), reusing the compiled schedule in O(1) lookup time across subsequent calls unless graph topology or target generations change; executing a schedule runs in O(P) over the scheduled chips or passes.
 
 5. **Dual-Tier Hardware Interoperability**:
    - High-level abstractions expose raw underlying handles (`GPUDevice`, `GPUBuffer`, `GPUTexture`, `GPUCommandEncoder`). Callers can execute custom imperative passes alongside managed passes without translation overhead.
@@ -118,16 +118,25 @@ Low-level WebAssembly execution runtime, linear memory arena coordinator, binary
 Demonstrates coordinating entity management, 3D mathematics, temporal spring dynamics, and WebGPU command execution across Atoolkit modules:
 
 ```typescript
-import { EntityPool, ComponentSet, FloatSet, query2 } from "./aecs/index.js";
-import { Vec3, Mat4 } from "./alm/index.js";
-import { Spring } from "./atempo/index.js";
-import { Device, Buffer, StreamSet, BindLayout, BindTable, RasterPipeline, Target, RenderPassNode } from "./awgpu/index.js";
-import { Bus } from "./adiag/index.js";
+import { EntityPool, ComponentSet, FloatSet, Query } from "@asciiz/atoolkit/aecs";
+import { Mat4 } from "@asciiz/atoolkit/alm";
+import { Spring } from "@asciiz/atoolkit/atempo";
+import {
+	Device,
+	Buffer,
+	StreamSet,
+	BindLayout,
+	BindTable,
+	RasterPipeline,
+	Target,
+	RenderPassNode,
+} from "@asciiz/atoolkit/awgpu";
+import { Bus } from "@asciiz/atoolkit/adiag";
 
 // 1. Diagnostics & Hardware Foundation
-const bus = new Bus(500);
-const gfx = await Device.create({ canvas: "#viewport" });
-bus.info({ code: "GPU_READY", raw: "Device acquired: $format$", data: { format: gfx.format } });
+const bus = new Bus({ maxHistory: 500 });
+const gfx = await Device.create();
+bus.info("GPU_READY", { format: gfx.format });
 
 // 2. Entity Component Storage
 const entities = new EntityPool();
@@ -135,40 +144,58 @@ const transforms = new FloatSet(16); // stores 4x4 matrix per entity
 const tagSet = new ComponentSet<string>();
 
 const player = entities.spawn();
-transforms.set(player, Mat4.identity(new Mat4()));
+transforms.setFromArray(player, Mat4.identity(new Mat4()));
 tagSet.set(player, "ActivePlayer");
+const entityQuery = new Query(transforms, tagSet);
 
 // 3. Temporal Harmonic Follower
-const spring = new Spring({ stiffness: 180, damping: 14, mass: 1 });
-spring.target = 5.0; // animate target elevation
+const spring = new Spring(3.0, 0.85);
+const springState: [number, number] = [0.0, 0.0]; // [position, velocity]
+const targetElevation = 5.0;
 
 // 4. Managed GPU Geometry & Uniforms
-const posBuf = Buffer.createVertex(gfx, new Float32Array([-1, -1, 0,  1, -1, 0,  0, 1, 0]));
-const uboBuf = Buffer.createUniform(gfx, 64);
+const vertices = new Float32Array([-1, -1, 0, 1, -1, 0, 0, 1, 0]);
+const posBuf = Buffer.vertex(gfx, vertices);
+const uboBuf = Buffer.uniform(gfx, 64);
 
-const streams = new StreamSet().addStream(0, posBuf, "float32x3");
-const target = Target.createScreen(gfx);
+const streams = new StreamSet().addVertex(0, 0, "float32x3", posBuf);
+const target = Target.createOffscreen(gfx, {
+	width: 800,
+	height: 600,
+	colorFormats: [gfx.format],
+});
 
 const bindLayout = BindLayout.builder()
-    .addUniform(0, GPUShaderStage.VERTEX)
-    .build(gfx);
+	.addUniform(0, GPUShaderStage.VERTEX)
+	.build(gfx);
 
-const bindTable = BindTable.create(gfx, bindLayout, [
-    { binding: 0, resource: uboBuf },
-]);
+const bindTable = BindTable.create(gfx, {
+	layout: bindLayout,
+	entries: [{ binding: 0, resource: uboBuf }],
+});
+
+const shaderSource = /* wgsl */ `
+@group(0) @binding(0) var<uniform> uMvp: mat4x4<f32>;
+@vertex fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
+	return uMvp * vec4<f32>(pos, 1.0);
+}
+@fragment fn fs_main() -> @location(0) vec4<f32> {
+	return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+}
+`;
 
 const pipeline = RasterPipeline.create(gfx, {
-    vertex: { code: shaderSource },
-    fragment: { code: shaderSource, targets: [{ format: gfx.format }] },
-    streamSet: streams,
-    layouts: [bindLayout],
+	vertex: { code: shaderSource },
+	fragment: { code: shaderSource, targets: [{ format: gfx.format }] },
+	streamSet: streams,
+	layouts: [bindLayout],
 });
 
 const pass = new RenderPassNode(target).addDraw({
-    pipeline,
-    streamSet: streams,
-    bindTables: [bindTable],
-    vertexCount: 3,
+	pipeline,
+	streamSet: streams,
+	bindTables: [bindTable],
+	vertexCount: 3,
 });
 
 // Scratch matrices (zero heap allocations in render loop)
@@ -179,20 +206,21 @@ Mat4.perspective(Math.PI / 4, 16 / 9, 0.1, 100, viewProj);
 
 // 5. Simulation & Render Tick
 function tick(deltaTime: number) {
-    // Evaluate continuous harmonic spring displacement
-    spring.step(deltaTime);
-    const elevation = spring.position;
+	// Evaluate continuous harmonic spring displacement
+	spring.updateScalar(springState[0], springState[1], targetElevation, deltaTime, springState);
+	const elevation = springState[0];
 
-    // Process matching entities
-    query2(transforms, tagSet, (entity, matrixView) => {
-        Mat4.translation(0, elevation, -5, model);
-        Mat4.mul(viewProj, model, mvp);
-        uboBuf.write(gfx, mvp);
-    });
+	// Process matching entities
+	entityQuery.forEachEntity((_entity) => {
+		Mat4.fromTranslation([0, elevation, -5], model);
+		Mat4.mul(viewProj, model, mvp);
+		uboBuf.write(gfx, mvp);
+	});
 
-    // Record and submit commands
-    const encoder = gfx.createCommandEncoder("FrameEncoder");
-    pass.execute(encoder);
-    gfx.submit(encoder);
+	// Record and submit commands
+	const encoder = gfx.native.createCommandEncoder({ label: "FrameEncoder" });
+	pass.execute(encoder);
+	gfx.queue.submit([encoder.finish()]);
 }
+void tick;
 ```

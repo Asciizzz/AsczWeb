@@ -1,15 +1,20 @@
-import { Track } from "../track.js";
+import { Track, type TrackOptions } from "../track.js";
 
 /**
  * Scalar floating-point sequence track.
- * You will prolly be using this 99% of the time.
  */
 export class FloatTrack extends Track<number, number> {
-    blend(a: number, b: number, alpha: number): number {
-        return a + (b - a) * alpha;
-    }
+	constructor(options?: TrackOptions | number) {
+		super(options);
+	}
 
-    protected defaultValue(): number {
-        return 0;
-    }
+	override blend(a: number, b: number, alpha: number): number {
+		return a + (b - a) * alpha;
+	}
+
+	protected override defaultValue(): number {
+		return 0;
+	}
 }
+
+export { FloatTrack as ScalarTrack };

@@ -1,329 +1,205 @@
 import type { Entity } from "./Entity.js";
+import type { ComponentSet } from "./ComponentSet.js";
+import type { FloatSet } from "./FloatSet.js";
+
+/** Any component store supported by Query. */
+export type AnyStore = ComponentSet<any> | FloatSet;
+
+/** Extracts the value type yielded by a store S. */
+export type StoreValue<S> =
+	S extends ComponentSet<infer T> ? T :
+	S extends FloatSet ? Float32Array :
+	never;
+
+/** Maps a tuple of stores to the tuple of [Entity, ...StoreValues] yielded by Query. */
+export type QueryRow<Stores extends readonly AnyStore[]> = [
+	Entity,
+	...{ [K in keyof Stores]: StoreValue<Stores[K]> }
+];
 
 /**
- * Structural interface satisfied by ComponentSet and FloatSet.
+ * Multi-store sparse-set intersection query with optional exclusion filters.
+ *
+ * Scans the smallest required store as the pivot and probes all other required
+ * and excluded stores in O(1) per candidate entity.
+ *
+ * Structural mutation of participating stores during active query traversal throws an Error.
  */
-export interface EntitySetLike {
-    readonly size: number;
-    readonly entities: readonly Entity[];
-    has(entity: Entity): boolean;
-}
+export class Query<const Stores extends readonly AnyStore[]> {
+	readonly #stores: Stores;
+	readonly #excluded: AnyStore[] = [];
 
-/**
- * Component accessor interface supporting generic component retrieval.
- */
-export interface ComponentSource<T> extends EntitySetLike {
-    get(entity: Entity): T | undefined;
-}
+	constructor(...stores: Stores) {
+		this.#stores = stores;
+	}
 
-/**
- * Multi-set entity query engine with driver set optimization.
- */
-export class Query implements Iterable<Entity> {
-    protected readonly _all: EntitySetLike[] = [];
-    protected readonly _none: EntitySetLike[] = [];
-    protected readonly _any: EntitySetLike[] = [];
+	/** Excludes entities that are present in any of the given stores. */
+	not(...excluded: AnyStore[]): this {
+		this.#excluded.push(...excluded);
+		return this;
+	}
 
-    constructor(
-        all: EntitySetLike[] = [],
-        none: EntitySetLike[] = [],
-        any: EntitySetLike[] = []
-    ) {
-        if (all.length > 0) {
-            for (let i = 0; i < all.length; i++) this._all.push(all[i]);
-        }
-        if (none.length > 0) {
-            for (let i = 0; i < none.length; i++) this._none.push(none[i]);
-        }
-        if (any.length > 0) {
-            for (let i = 0; i < any.length; i++) this._any.push(any[i]);
-        }
-    }
+	#lockStores(): void {
+		for (let i = 0; i < this.#stores.length; i++) {
+			this.#stores[i]._beginIteration();
+		}
+		for (let i = 0; i < this.#excluded.length; i++) {
+			this.#excluded[i]._beginIteration();
+		}
+	}
 
-    /**
-     * Adds required component sets.
-     */
-    all(...sets: EntitySetLike[]): this {
-        for (let i = 0; i < sets.length; i++) this._all.push(sets[i]);
-        return this;
-    }
+	#unlockStores(): void {
+		for (let i = 0; i < this.#stores.length; i++) {
+			this.#stores[i]._endIteration();
+		}
+		for (let i = 0; i < this.#excluded.length; i++) {
+			this.#excluded[i]._endIteration();
+		}
+	}
 
-    /**
-     * Adds excluded component sets.
-     */
-    none(...sets: EntitySetLike[]): this {
-        for (let i = 0; i < sets.length; i++) this._none.push(sets[i]);
-        return this;
-    }
+	#findPivotIndex(): number {
+		const stores = this.#stores;
+		if (stores.length === 0) return -1;
+		let minIdx = 0;
+		let minSize = stores[0].size;
+		for (let i = 1; i < stores.length; i++) {
+			const sz = stores[i].size;
+			if (sz < minSize) {
+				minSize = sz;
+				minIdx = i;
+			}
+		}
+		return minSize === 0 ? -1 : minIdx;
+	}
 
-    /**
-     * Adds optional component sets (at least one must match).
-     */
-    any(...sets: EntitySetLike[]): this {
-        for (let i = 0; i < sets.length; i++) this._any.push(sets[i]);
-        return this;
-    }
+	#matchesAt(entity: Entity, pivotIdx: number): boolean {
+		const stores = this.#stores;
+		const excluded = this.#excluded;
 
-    /**
-     * Evaluates whether an entity satisfies all query constraints.
-     */
-    matches(entity: Entity): boolean {
-        for (let i = 0; i < this._all.length; i++) {
-            if (!this._all[i].has(entity)) return false;
-        }
-        for (let i = 0; i < this._none.length; i++) {
-            if (this._none[i].has(entity)) return false;
-        }
-        if (this._any.length > 0) {
-            let matchedAny = false;
-            for (let i = 0; i < this._any.length; i++) {
-                if (this._any[i].has(entity)) {
-                    matchedAny = true;
-                    break;
-                }
-            }
-            if (!matchedAny) return false;
-        }
-        return true;
-    }
+		for (let j = 0; j < stores.length; j++) {
+			if (j !== pivotIdx && !stores[j].has(entity)) {
+				return false;
+			}
+		}
+		for (let k = 0; k < excluded.length; k++) {
+			if (excluded[k].has(entity)) {
+				return false;
+			}
+		}
+		return true;
+	}
 
-    /**
-     * Determines driver set with minimum size.
-     */
-    private _findDriver(): EntitySetLike | undefined {
-        if (this._all.length === 0) return undefined;
-        let driver = this._all[0];
-        for (let i = 1; i < this._all.length; i++) {
-            if (this._all[i].size < driver.size) {
-                driver = this._all[i];
-            }
-        }
-        return driver;
-    }
+	/**
+	 * Zero-view-allocation traversal that invokes callback with each matching Entity handle.
+	 * Callers can read components via store.getDirect(entity, ...) or denseIndexOf(entity).
+	 */
+	forEachEntity(callback: (entity: Entity) => void): void {
+		const pivotIdx = this.#findPivotIndex();
+		if (pivotIdx < 0) return;
 
-    /**
-     * Executes callback for each entity satisfying query constraints.
-     */
-    each(fn: (entity: Entity) => void): void {
-        if (this._all.length > 0) {
-            const driver = this._findDriver()!;
-            if (driver.size === 0) return;
+		const pivot = this.#stores[pivotIdx];
+		const pivotEntities = pivot.entities;
+		const pivotLen = pivot.size;
 
-            const ents = driver.entities;
-            const len = driver.size;
-            const allSets = this._all;
-            const allCount = allSets.length;
-            const noneSets = this._none;
-            const noneCount = noneSets.length;
-            const anySets = this._any;
-            const anyCount = anySets.length;
+		this.#lockStores();
+		try {
+			for (let i = 0; i < pivotLen; i++) {
+				const entity = pivotEntities[i];
+				if (this.#matchesAt(entity, pivotIdx)) {
+					callback(entity);
+				}
+			}
+		} finally {
+			this.#unlockStores();
+		}
+	}
 
-            entityLoop:
-            for (let i = 0; i < len; i++) {
-                const entity = ents[i];
+	/**
+	 * Yields [entity, ...components] for each entity matching all required stores and no excluded stores.
+	 * Note: allocates a row array (and FloatSet subarray views if FloatSet stores are queried) per match.
+	 */
+	*each(): IterableIterator<QueryRow<Stores>> {
+		const pivotIdx = this.#findPivotIndex();
+		if (pivotIdx < 0) return;
 
-                for (let j = 0; j < allCount; j++) {
-                    const set = allSets[j];
-                    if (set === driver) continue;
-                    if (!set.has(entity)) continue entityLoop;
-                }
-                for (let j = 0; j < noneCount; j++) {
-                    if (noneSets[j].has(entity)) continue entityLoop;
-                }
-                if (anyCount > 0) {
-                    let matchedAny = false;
-                    for (let j = 0; j < anyCount; j++) {
-                        if (anySets[j].has(entity)) {
-                            matchedAny = true;
-                            break;
-                        }
-                    }
-                    if (!matchedAny) continue entityLoop;
-                }
+		const stores = this.#stores;
+		const numStores = stores.length;
+		const pivot = stores[pivotIdx];
+		const pivotEntities = pivot.entities;
+		const pivotLen = pivot.size;
 
-                fn(entity);
-            }
-            return;
-        }
+		this.#lockStores();
+		try {
+			for (let i = 0; i < pivotLen; i++) {
+				const entity = pivotEntities[i];
+				if (!this.#matchesAt(entity, pivotIdx)) {
+					continue;
+				}
+				const row = new Array(numStores + 1);
+				row[0] = entity;
+				for (let j = 0; j < numStores; j++) {
+					row[j + 1] = j === pivotIdx
+						? stores[j].getAtDenseIndex(i)
+						: stores[j].get(entity);
+				}
+				yield row as unknown as QueryRow<Stores>;
+			}
+		} finally {
+			this.#unlockStores();
+		}
+	}
 
-        if (this._any.length > 0) {
-            const anySets = this._any;
-            const anyCount = anySets.length;
-            const noneSets = this._none;
-            const noneCount = noneSets.length;
+	/** Making Query directly iterable in for..of loops. */
+	[Symbol.iterator](): IterableIterator<QueryRow<Stores>> {
+		return this.each();
+	}
 
-            for (let k = 0; k < anyCount; k++) {
-                const source = anySets[k];
-                const len = source.size;
-                const ents = source.entities;
+	/** Returns the number of matching entities without constructing component views. */
+	get count(): number {
+		const pivotIdx = this.#findPivotIndex();
+		if (pivotIdx < 0) return 0;
 
-                entityLoopAny:
-                for (let i = 0; i < len; i++) {
-                    const entity = ents[i];
+		const pivot = this.#stores[pivotIdx];
+		const pivotEntities = pivot.entities;
+		const pivotLen = pivot.size;
 
-                    // Deduplicate against sets already processed
-                    for (let prev = 0; prev < k; prev++) {
-                        if (anySets[prev].has(entity)) continue entityLoopAny;
-                    }
-                    for (let j = 0; j < noneCount; j++) {
-                        if (noneSets[j].has(entity)) continue entityLoopAny;
-                    }
+		let n = 0;
+		for (let i = 0; i < pivotLen; i++) {
+			if (this.#matchesAt(pivotEntities[i], pivotIdx)) {
+				n++;
+			}
+		}
+		return n;
+	}
 
-                    fn(entity);
-                }
-            }
-        }
-    }
+	/**
+	 * Returns the first matching [entity, ...components] row, or undefined if no entity matches.
+	 * Stops scanning immediately upon finding the first match.
+	 */
+	get first(): QueryRow<Stores> | undefined {
+		const pivotIdx = this.#findPivotIndex();
+		if (pivotIdx < 0) return undefined;
 
-    /**
-     * Collects all matching entities into an array.
-     */
-    entities(): Entity[] {
-        const result: Entity[] = [];
-        this.each(e => result.push(e));
-        return result;
-    }
+		const stores = this.#stores;
+		const numStores = stores.length;
+		const pivot = stores[pivotIdx];
+		const pivotEntities = pivot.entities;
+		const pivotLen = pivot.size;
 
-    /**
-     * Returns first matching entity, or undefined if no entity matches.
-     */
-    first(): Entity | undefined {
-        let found: Entity | undefined;
-        this.each(e => {
-            if (found === undefined) found = e;
-        });
-        return found;
-    }
-
-    /**
-     * Counts number of entities matching query constraints.
-     */
-    count(): number {
-        let total = 0;
-        this.each(() => total++);
-        return total;
-    }
-
-    /**
-     * Iterator yielding matching entities.
-     */
-    *[Symbol.iterator](): IterableIterator<Entity> {
-        const list = this.entities();
-        for (let i = 0; i < list.length; i++) {
-            yield list[i];
-        }
-    }
-}
-
-/**
- * Fluent builder for constructing and executing multi-set queries.
- */
-export class QueryBuilder extends Query {
-    build(): Query {
-        return this;
-    }
-}
-
-/**
- * Creates a fluent QueryBuilder.
- */
-export function createQuery(): QueryBuilder {
-    return new QueryBuilder();
-}
-
-/**
- * Fast two-way join driven from smaller set.
- * Supports ComponentSet and FloatSet.
- */
-export function query2<A, B>(
-    setA: ComponentSource<A>,
-    setB: ComponentSource<B>,
-    fn: (entity: Entity, a: A, b: B) => void
-): void {
-    if (setA.size === 0 || setB.size === 0) return;
-
-    if (setA.size <= setB.size) {
-        const len = setA.size;
-        const ents = setA.entities;
-        const denseA = "dense" in setA && Array.isArray((setA as any).dense) ? (setA as any).dense as A[] : undefined;
-
-        for (let i = 0; i < len; i++) {
-            const entity = ents[i];
-            const b = setB.get(entity);
-            if (b !== undefined) {
-                const a = denseA ? denseA[i] : setA.get(entity);
-                if (a !== undefined) fn(entity, a, b);
-            }
-        }
-    } else {
-        const len = setB.size;
-        const ents = setB.entities;
-        const denseB = "dense" in setB && Array.isArray((setB as any).dense) ? (setB as any).dense as B[] : undefined;
-
-        for (let i = 0; i < len; i++) {
-            const entity = ents[i];
-            const a = setA.get(entity);
-            if (a !== undefined) {
-                const b = denseB ? denseB[i] : setB.get(entity);
-                if (b !== undefined) fn(entity, a, b);
-            }
-        }
-    }
-}
-
-/**
- * Fast three-way join driven from smallest set.
- * Supports ComponentSet and FloatSet.
- */
-export function query3<A, B, C>(
-    setA: ComponentSource<A>,
-    setB: ComponentSource<B>,
-    setC: ComponentSource<C>,
-    fn: (entity: Entity, a: A, b: B, c: C) => void
-): void {
-    if (setA.size === 0 || setB.size === 0 || setC.size === 0) return;
-
-    if (setA.size <= setB.size && setA.size <= setC.size) {
-        const len = setA.size;
-        const ents = setA.entities;
-        const denseA = "dense" in setA && Array.isArray((setA as any).dense) ? (setA as any).dense as A[] : undefined;
-
-        for (let i = 0; i < len; i++) {
-            const entity = ents[i];
-            const b = setB.get(entity);
-            if (b === undefined) continue;
-            const c = setC.get(entity);
-            if (c === undefined) continue;
-            const a = denseA ? denseA[i] : setA.get(entity);
-            if (a !== undefined) fn(entity, a, b, c);
-        }
-    } else if (setB.size <= setA.size && setB.size <= setC.size) {
-        const len = setB.size;
-        const ents = setB.entities;
-        const denseB = "dense" in setB && Array.isArray((setB as any).dense) ? (setB as any).dense as B[] : undefined;
-
-        for (let i = 0; i < len; i++) {
-            const entity = ents[i];
-            const a = setA.get(entity);
-            if (a === undefined) continue;
-            const c = setC.get(entity);
-            if (c === undefined) continue;
-            const b = denseB ? denseB[i] : setB.get(entity);
-            if (b !== undefined) fn(entity, a, b, c);
-        }
-    } else {
-        const len = setC.size;
-        const ents = setC.entities;
-        const denseC = "dense" in setC && Array.isArray((setC as any).dense) ? (setC as any).dense as C[] : undefined;
-
-        for (let i = 0; i < len; i++) {
-            const entity = ents[i];
-            const a = setA.get(entity);
-            if (a === undefined) continue;
-            const b = setB.get(entity);
-            if (b === undefined) continue;
-            const c = denseC ? denseC[i] : setC.get(entity);
-            if (c !== undefined) fn(entity, a, b, c);
-        }
-    }
+		for (let i = 0; i < pivotLen; i++) {
+			const entity = pivotEntities[i];
+			if (!this.#matchesAt(entity, pivotIdx)) {
+				continue;
+			}
+			const row = new Array(numStores + 1);
+			row[0] = entity;
+			for (let j = 0; j < numStores; j++) {
+				row[j + 1] = j === pivotIdx
+					? stores[j].getAtDenseIndex(i)
+					: stores[j].get(entity);
+			}
+			return row as unknown as QueryRow<Stores>;
+		}
+		return undefined;
+	}
 }

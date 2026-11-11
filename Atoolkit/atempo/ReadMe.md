@@ -23,60 +23,55 @@ Atempo structures temporal operations across seven primitives:
 `Track<T, TOut = T>` manages chronological keyframe sequences, locates active interval spans, and shapes interval progress before calling data interpolation.
 
 ```typescript
-import { Track } from "./track.js";
-import { type Curve } from "./curve.js";
+import { Track } from "@asciiz/atoolkit/atempo";
 
-export class FloatTrack extends Track<number, number> {
-    blend(a: number, b: number, alpha: number): number {
-        return a + (b - a) * alpha;
-    }
+export class CustomFloatTrack extends Track<number, number> {
+	blend(a: number, b: number, alpha: number): number {
+		return a + (b - a) * alpha;
+	}
 
-    protected defaultValue(): number {
-        return 0;
-    }
+	protected defaultValue(): number {
+		return 0;
+	}
 }
 ```
 
-- Storage layout:
-  - `_times: Float64Array`: Resizable contiguous array of double-precision timestamps maintaining ascending chronological order.
-  - `_values: T[]`: Ordered array storing keyframe values corresponding to each timestamp.
-  - `_curves: (Curve<any> | undefined)[]`: Ordered array storing interval transfer evaluators applied across span `[i, i + 1]`.
-  - `_curveData: (any | undefined)[]`: Ordered array storing parameter bags passed to curve evaluators.
-  - `_fps: (number | undefined)[]`: Ordered array storing optional frame-rate locks per interval.
-  - `fps?: number`: Optional default track-wide frame rate applied to unconstrained intervals.
-- `addKey(time, value, curve?, curveData?, fps?)`: Inserts keyframe. Appends in O(1) when timestamp exceeds tail; executes binary search insertion sort in O(N) when inserting out-of-order.
+- Keyframe & timeline properties:
+  - `startTime`: Timestamp of the first keyframe, or `0` if empty.
+  - `endTime`: Timestamp of the last keyframe, or `0` if empty.
+  - `duration`: Total keyframe span (`endTime - startTime`), or `0` when the track has `0` or `1` keyframe.
+- `addKey(time, value, curve?, curveData?, fps?)`: Validates that `time` is finite (`RangeError` otherwise). Replaces the existing keyframe in place if `time` matches an existing keyframe timestamp, appends in O(1) when `time` exceeds the tail, or inserts in sorted order via binary search in O(N).
 - `setCurve(index, curve?, curveData?, fps?)`: Updates curve evaluator and parameters on existing keyframe in O(1).
-- `removeKey(index)`: Shifts timestamp array via `copyWithin` and splices value arrays in O(N).
-- `sample(time, out)`: Evaluates active interval span, quantizes normalized progress `tau` when interval or track FPS is configured, calls `curve(tau, curveData, ctx)`, and invokes `blend(a, b, alpha, out)`.
-- `sampleRatio(ratio, out)`: Evaluates track value at normalized progression ratio in `[0.0, 1.0]`. Maps ratio across track time span: `startTime + ratio * duration`.
-- `getKey(index)`: Returns keyframe object `{ time, value, curve, curveData, fps }` at index, or `undefined` if out of bounds.
+- `removeKeyAt(index)` / `removeKeyAtTime(time)`: Removes a keyframe by index or timestamp.
+- `sample(time, out?)`: Evaluates active interval span, quantizes normalized progress `tau` when interval or track FPS is configured, calls `curve(tau, curveData, ctx)`, and invokes `blend(a, b, alpha, out)`.
+- `sampleRatio(ratio, out?)`: Evaluates track value at normalized progression ratio in `[0.0, 1.0]`. Maps ratio across the track's own keyframe span: `startTime + ratio * duration`.
+- `getKey(index)`: Returns keyframe snapshot at index, or `undefined` if out of bounds.
 - `extrapolation`: Configures boundary handling:
   - `Extrapolation.Clamp`: Holds boundary value when time is before start or after end.
-  - `Extrapolation.Loop`: Wraps evaluation time into `[startTime, endTime)` range via modulo arithmetic.
-  - `Extrapolation.PingPong`: Reflects evaluation time back and forth across track duration.
+  - `Extrapolation.Loop`: Wraps evaluation time into `[startTime, endTime)` range via modulo arithmetic over `duration`.
+  - `Extrapolation.PingPong`: Reflects evaluation time back and forth across `duration`.
 - Memory & caching:
-  - Caches last sampled interval index `_cachedIndex` for O(1) sequential playback lookup.
+  - Caches last sampled interval index for O(1) sequential playback lookup.
   - Falls back to O(log N) binary search on random seek or playback reversal.
-  - Reuses provided `out` buffer in subclasses to maintain zero allocations during playback.
+  - Reuses caller-provided `out` buffer in vector, quaternion, and color subclasses to maintain zero allocations during playback.
 
 ---
 
 ## 2. Track Presets
 
-Concrete track implementations reside in `tracks/` folder to allow modular imports without unused data math.
-
 ### 2.1 FloatTrack
 
-Evaluates scalar floating-point sequences (`tracks/float.ts`).
+Evaluates scalar floating-point sequences.
 
 ```typescript
-import { FloatTrack } from "./tracks/float.js";
+import { FloatTrack } from "@asciiz/atoolkit/atempo";
 
 const track = new FloatTrack();
 track.addKey(0.0, 0.0);
 track.addKey(1.0, 100.0);
 
 const val = track.sample(0.5); // 50.0
+void val;
 ```
 
 - `blend(a, b, alpha)`: Evaluates linear interpolation `a + (b - a) * alpha`. Returns primitive number with zero heap allocation.
@@ -84,14 +79,14 @@ const val = track.sample(0.5); // 50.0
 
 ### 2.2 VecTrack
 
-Evaluates N-dimensional vector sequences (`tracks/vec.ts`).
+Evaluates N-dimensional vector sequences (`VecTrack`, `Vec2Track`, `Vec3Track`, `Vec4Track`).
 
 ```typescript
-import { VecTrack } from "./tracks/vec.js";
+import { VecTrack } from "@asciiz/atoolkit/atempo";
 
 const posTrack = new VecTrack(3);
-posTrack.addKey(0.0, [0, 10, 20]);
-posTrack.addKey(2.0, [100, 110, 120]);
+posTrack.addKey(0.0, new Float32Array([0, 10, 20]));
+posTrack.addKey(2.0, new Float32Array([100, 110, 120]));
 
 const out = new Float32Array(3);
 posTrack.sample(1.0, out); // out is [50, 60, 70]
@@ -99,15 +94,15 @@ posTrack.sample(1.0, out); // out is [50, 60, 70]
 
 - Storage & configuration:
   - `dimension: number`: Component count per keyframe (e.g. 2 for Vec2, 3 for Vec3, 4 for Vec4).
-- `blend(a, b, alpha, out)`: Linearly interpolates each vector component across dimension: `out[i] = a[i] * (1 - alpha) + b[i] * alpha`.
-- Memory: Allocates `Float32Array(dimension)` only when `out` parameter is omitted. Mutates caller-provided `out` buffer in-place without heap allocations.
+- `addKey`: Clones the input vector so subsequent caller mutations do not alter stored keyframes.
+- `blend(a, b, alpha, out)`: Linearly interpolates each vector component across dimension: `out[i] = a[i] * (1 - alpha) + b[i] * alpha` into the caller-supplied `out` buffer.
 
 ### 2.3 QuatTrack
 
-Evaluates 4D quaternion orientations via spherical linear interpolation (`tracks/quat.ts`).
+Evaluates 4D quaternion orientations via spherical linear interpolation.
 
 ```typescript
-import { QuatTrack } from "./tracks/quat.js";
+import { QuatTrack } from "@asciiz/atoolkit/atempo";
 
 const rotTrack = new QuatTrack();
 rotTrack.addAxisAngleKey(0.0, [0, 1, 0], 0.0);
@@ -117,36 +112,34 @@ const outQuat = new Float32Array(4);
 rotTrack.sample(1.0, outQuat);
 ```
 
-- `blend(a, b, alpha, out)`: Evaluates spherical linear interpolation (SLERP).
-  - Dot product evaluation: Computes `dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w`.
+- `blend(a, b, alpha, out)`: Evaluates spherical linear interpolation (SLERP) into `out`.
+  - Normalizes endpoint quaternions and computes `dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w`.
   - Antipodal check: When `dot < 0`, negates quaternion `b` and sets `dot = -dot` to enforce acute shortest-path rotation (arc <= 180 degrees).
   - Singularity threshold: When `dot > 0.9995`, falls back to normalized linear interpolation to avoid division by zero in `sin(theta)`.
   - Renormalization: Normalizes output vector to ensure unit quaternion length.
-- `addAxisAngleKey(time, axis, rad, curve)`: Converts axis-angle rotation into quaternion `[x*s, y*s, z*s, cos(rad/2)]` and appends keyframe.
-- Memory: Mutates caller-provided `Float32Array(4)` in-place without heap allocations.
+- `addAxisAngleKey(time, axis, rad, curve?)`: Normalizes `axis` (throwing `RangeError` if zero-length), converts axis-angle rotation into quaternion `[x*s, y*s, z*s, cos(rad/2)]`, and appends keyframe.
 
 ### 2.4 ColorTrack
 
-Evaluates RGB or RGBA color channels with perceptual gamma or linear blending (`tracks/color.ts`).
+Evaluates RGB or RGBA color channels with approximate gamma-2 or linear blending.
 
 ```typescript
-import { ColorTrack, ColorSpace } from "./tracks/color.js";
+import { ColorTrack, ColorSpace } from "@asciiz/atoolkit/atempo";
 
-const colorTrack = new ColorTrack(4, ColorSpace.PerceptualGamma);
-colorTrack.addKey(0.0, [1, 0, 0, 1]);
-colorTrack.addKey(1.0, [0, 1, 0, 1]);
+const colorTrack = new ColorTrack({ dimension: 4, colorSpace: ColorSpace.ApproxGamma2 });
+colorTrack.addKey(0.0, new Float32Array([1, 0, 0, 1]));
+colorTrack.addKey(1.0, new Float32Array([0, 1, 0, 1]));
 
 const outCol = new Float32Array(4);
 colorTrack.sample(0.5, outCol); // Midpoint red/green evaluate to ~0.7071
 ```
 
 - Storage & configuration:
-  - `dimension: number`: Channel count (3 for RGB, 4 for RGBA).
-  - `colorSpace: ColorSpace`: `ColorSpace.PerceptualGamma` or `ColorSpace.Linear`.
+  - `dimension: 3 | 4`: Channel count (`3` for RGB, `4` for RGBA).
+  - `colorSpace: ColorSpace`: `ColorSpace.ApproxGamma2` or `ColorSpace.Linear`.
 - `blend(a, b, alpha, out)`:
-  - Under `ColorSpace.PerceptualGamma`: Blends RGB channels in squared space `sqrt((1 - alpha) * a^2 + alpha * b^2)` to preserve luminance energy and eliminate dark midpoint dips. Interpolates alpha channel linearly.
+  - Under `ColorSpace.ApproxGamma2`: Clamps negative RGB inputs to `0` before blending in squared space `sqrt((1 - alpha) * a^2 + alpha * b^2)` to preserve luminance energy and avoid `NaN`. Interpolates alpha channel linearly.
   - Under `ColorSpace.Linear`: Evaluates standard linear interpolation across all channels.
-- Memory: Mutates caller-provided `Float32Array` in-place without heap allocations.
 
 ---
 
@@ -156,25 +149,22 @@ A curve is a scalar progress shaping function mapping normalized interval progre
 
 ```typescript
 export interface InterpolationContext {
-    readonly dt: number;
-    readonly k0Time: number;
-    readonly k1Time: number;
+	readonly dt: number;
+	readonly k0Time: number;
+	readonly k1Time: number;
 }
 
 export type Curve<TData = any> = (
-    t: number,
-    data?: TData,
-    ctx?: InterpolationContext
+	t: number,
+	data?: TData,
+	ctx?: InterpolationContext
 ) => number;
 ```
 
-Curves reside in `curves/` as stateless evaluators:
+Curves are exported directly from `@asciiz/atoolkit/atempo`:
 
 ```typescript
-import { FloatTrack } from "./tracks/float.js";
-import { quadInOut } from "./curves/quad.js";
-import { step } from "./curves/step.js";
-import { bezier } from "./curves/bezier.js";
+import { FloatTrack, quadInOut, step, bezier } from "@asciiz/atoolkit/atempo";
 
 const track = new FloatTrack();
 
@@ -222,9 +212,7 @@ track.addKey(4.0, 200.0, (t) => t * t * t);
 `Clip` manages multiple named `Track` instances on a shared timeline, evaluating all tracks simultaneously into a target dictionary (`clip.ts`).
 
 ```typescript
-import { Clip } from "./clip.js";
-import { FloatTrack } from "./tracks/float.js";
-import { VecTrack } from "./tracks/vec.js";
+import { Clip, FloatTrack, VecTrack } from "@asciiz/atoolkit/atempo";
 
 const clip = new Clip("CharacterIntro");
 clip.addTrack("intensity", new FloatTrack());
@@ -234,29 +222,27 @@ clip.addMarker(0.5, "FlashTrigger");
 clip.addMarker(1.2, "CameraCut");
 
 const state = {
-    position: new Float32Array(3),
-    intensity: 0,
+	position: new Float32Array(3),
+	intensity: 0,
 };
 
 function onUpdate(timeSec: number, prevTimeSec: number) {
-    clip.sample(timeSec, state);
-    const crossed = clip.sampleCrossedMarkers(prevTimeSec, timeSec);
+	clip.sample(timeSec, state);
+	const crossed = clip.sampleCrossedMarkers(prevTimeSec, timeSec);
+	void crossed;
 }
+void onUpdate;
 ```
 
-- Storage layout:
-  - `_tracks: Map<string, Track<any, any>>`: Map storing registered tracks by string name.
-  - `_markers: ClipMarker[]`: Array of timeline cue markers sorted chronologically by time.
-- `addTrack(name, track)`: Registers named track in clip, returning track instance.
+- `addTrack(name, track)`: Registers named track in clip, returning the `Clip` for chaining.
 - `getTrack(name)`: Retrieves track by name, or `undefined` if not registered.
-- `sample(time, target)`: Evaluates all registered tracks at timestamp, writing results into `target[name]`. Reuses existing typed arrays in `target` to maintain zero heap allocations.
-- `sampleRatio(ratio, target)`: Evaluates all registered tracks at normalized progression ratio in `[0.0, 1.0]`. Maps ratio across bounding span: `startTime + ratio * (endTime - startTime)`. Enables hierarchical cross-clip coordination where master driver tracks control child clip progression.
-- `addMarker(time, label, data)`: Inserts timeline marker and sorts marker array by time.
-- `getMarkersInRange(start, end, out?)`: Returns markers located within interval `[start, end]`. Writes into optional `out` array for zero heap allocations.
-- `sampleCrossedMarkers(previousTime, currentTime, out?)`: Returns markers crossed within time window. Writes into optional `out` array for zero heap allocations. Evaluates ascending order during forward playback; descending order during reverse playback.
-- `sampleCrossedMarkersRatio(previousRatio, currentRatio, out?)`: Identifies markers crossed across normalized progression window `[previousRatio, currentRatio]`. Writes into optional `out` array for zero heap allocations.
-- `duration`: Returns maximum duration among registered tracks.
-- `startTime` & `endTime`: Returns bounding time limits across active tracks.
+- `sample(time, target?)`: Evaluates all registered tracks at `time`, writing results into `target[name]`.
+- `sampleRatio(ratio, target?)`: Evaluates all registered tracks at normalized progression ratio in `[0.0, 1.0]` across the clip timeline span `startTime + ratio * duration`.
+- `addMarker(time, name, payload?)`: Inserts a timeline marker in ascending timestamp order (preserving insertion order for ties).
+- `getMarkersInRange(startTime, endTime)`: Returns markers located within `[startTime, endTime]`.
+- `sampleCrossedMarkers(prevTime, currTime)`: Returns markers crossed across the half-open interval `(prevTime, currTime]` during forward playback or `[currTime, prevTime)` in descending timestamp order during reverse playback. Returns `[]` when `prevTime === currTime`.
+- `startTime` & `endTime`: Bounding time limits across non-empty tracks (`startTime = min(0, minTrackStart)`, `endTime = maxTrackEnd`).
+- `duration`: Clip timeline span `maxTrackEnd - min(0, minTrackStart)` across non-empty tracks (distinct from an individual `Track.duration`, which is `track.endTime - track.startTime`).
 
 ---
 
@@ -265,49 +251,58 @@ function onUpdate(timeSec: number, prevTimeSec: number) {
 `Cadence` provides frame-rate independent decays, critically damped followers, and discrete time quantizers (`cadence.ts`).
 
 ```typescript
-import { Cadence, FixedCadence } from "./cadence.js";
+import { Cadence, FixedCadence } from "@asciiz/atoolkit/atempo";
 
-// Frame-rate independent decay: closes half the remaining gap every 0.15 seconds
-const smoothed = Cadence.decay(current, target, 0.15, deltaSec);
+const current = 0.0;
+const target = 10.0;
+const deltaSec = 1 / 60;
+
+// Frame-rate independent exponential decay
+const smoothed = Cadence.expDecay(current, target, 8.0, deltaSec);
 
 // Deterministic 60 Hz physics accumulator
-const sim = new FixedCadence(60, 5);
-const alpha = sim.update(deltaSec, (fixedDt, simTime) => {
-    physicsWorld.step(fixedDt);
+const sim = new FixedCadence(1 / 60, 5, "drop");
+const res = sim.update(deltaSec, (fixedDt) => {
+	void fixedDt;
 });
+void smoothed;
+void res;
 ```
 
-- `Cadence.decay(current, target, halfLife, deltaSec)`: Computes factor $e^{-\frac{\ln(2) \cdot \Delta t}{\text{halfLife}}}$ and returns `target + (current - target) * factor`. Guarantees identical convergence over real-world seconds regardless of frame rate.
-- `Cadence.damp(current, target, velocityRef, smoothTime, deltaSec, maxSpeed)`: Evaluates critically damped spring-damper follower. Mutates velocity in-place at `velocityRef[0]`. Clamps maximum speed and prevents target overshoot.
+- `Cadence.expDecay(current, target, decay, dt)`: Computes $target + (current - target) \cdot e^{-decay \cdot dt}$. Throws `RangeError` if `dt < 0` or non-finite; returns `current` when `dt === 0`.
+- `Cadence.damp(current, target, smoothTime, maxSpeed, dt, velocityRef, velocityIndex?)`: Evaluates critically damped spring-damper follower. Mutates velocity in-place at `velocityRef[velocityIndex ?? 0]`. Throws `RangeError` if `dt < 0` or non-finite.
 - `Cadence.quantizeTime(time, targetFps)`: Snaps continuous timestamp to stepped frame interval $\lfloor t \cdot fps \rfloor / fps$ (e.g. 12 FPS or 24 FPS stepping).
 - `Cadence.hysteresis(current, target, threshold)`: Rejects delta updates smaller than threshold to prevent value chatter.
 - `Cadence.debounce(time, lastTriggerTime, cooldown)`: Returns `true` only when elapsed time since last trigger exceeds cooldown.
-- `FixedCadence`: Accumulates elapsed delta time, executing step callback for each fixed tick `fixedDelta = 1 / targetHz`. Drops residual time if steps exceed `maxSubSteps` to avoid execution stalls. Returns fractional interpolation alpha in `[0, 1)` for visual rendering between simulation ticks.
+- `FixedCadence`: Accumulates elapsed delta time, executing step callback for each fixed tick `fixedDt`. Clamps accumulated steps to `maxSubSteps`, handles overflow via `"drop"` or `"retain"` mode, and exposes `alpha` in `[0, 1)` for visual interpolation between simulation ticks.
 
 ---
 
 ## 6. Analytical Harmonic Spring Dynamics
 
-`Spring` implements closed-form analytical solutions for damped harmonic oscillators, maintaining numerical stability across variable delta times (`spring.ts`).
+`Spring` implements closed-form analytical solutions for 2nd-order harmonic oscillators across undamped, under-damped, critically damped, and over-damped regimes (`spring.ts`).
 
 ```typescript
-import { Spring } from "./spring.js";
+import { Spring } from "@asciiz/atoolkit/atempo";
 
 const spring = new Spring(3.0, 0.7);
-const state = new Float32Array([0.0, 0.0]); // [position, velocity]
+const state: [number, number] = [0.0, 0.0]; // [position, velocity]
+const targetPosition = 5.0;
+const deltaSec = 1 / 60;
 
-spring.update(state, targetPosition, deltaSec);
+spring.updateScalar(state[0], state[1], targetPosition, deltaSec, state);
 ```
 
-- Mathematical formulation: Solves 2nd-order differential equation $m \ddot{x} + c \dot{x} + k(x - x_{\text{target}}) = 0$.
+- Mathematical formulation: Solves 2nd-order differential equation $\ddot{x} + 2 \zeta \omega \dot{x} + \omega^2 (x - x_{\text{target}}) = 0$.
 - Configuration:
-  - `frequency: number`: Natural oscillation frequency in Hz. Angular frequency $\omega = 2 \pi f$.
-  - `damping: number`: Damping ratio $\zeta$.
-    - $\zeta < 1.0$: Under-damped oscillation with characteristic frequency $\omega_d = \omega \sqrt{1 - \zeta^2}$.
-    - $\zeta = 1.0$: Critically damped motion with fastest settling time and zero overshoot.
-    - $\zeta > 1.0$: Over-damped non-oscillatory exponential decay.
-- `update(posVel, target, deltaSec)`: Evaluates exact analytical position and velocity for elapsed deltaSec. Mutates `posVel[0]` (position) and `posVel[1]` (velocity) in-place without heap allocations.
-- `updateVector(posArray, velArray, targetArray, dimension, deltaSec, ...)`: Evaluates multiple spring channels across contiguous arrays using index offsets.
+  - `frequency: number`: Natural oscillation frequency in Hz ($\omega = 2 \pi f$).
+  - `damping: number`: Damping ratio $\zeta \ge 0$.
+    - $\zeta = 0$: Undamped simple harmonic oscillation with exact energy conservation.
+    - $0 < \zeta < 1.0$: Under-damped oscillation with damped frequency $\omega_d = \omega \sqrt{1 - \zeta^2}$.
+    - $\zeta = 1.0$: Critically damped motion with fastest non-oscillatory convergence.
+    - $\zeta > 1.0$: Over-damped non-oscillatory two-root exponential decay.
+- `updateScalar(position, velocity, target, dt, out)`: Evaluates exact analytical position and velocity for `dt`, writing `[newPosition, newVelocity]` into `out`. Throws `RangeError` if `dt < 0` or non-finite.
+- `updateArray(positions, velocities, targets, dt)`: Evaluates multiple spring channels in-place across typed arrays.
 
 ---
 
@@ -316,15 +311,13 @@ spring.update(state, targetPosition, deltaSec);
 `Phase` and `Metronome` evaluate cyclic phase coordinates, analytic waveforms, and beat boundary triggers (`phase.ts`).
 
 ```typescript
-import { Phase, Metronome } from "./phase.js";
+import { Phase, Metronome } from "@asciiz/atoolkit/atempo";
 
 // 120 BPM cyclic metronome
 const metro = new Metronome(120);
-const state = metro.sample(timeSec);
-// state.cycle: Total integer cycles elapsed
-// state.phase: Normalized cyclic progress in [0.0, 1.0)
-// state.justTriggered: True on frame crossing cycle boundary
-// state.impulse: Exponential decay kick pulse from 1.0
+const state = metro.sample(0.5);
+const wave = Phase.sine(state.phase);
+void wave;
 ```
 
 - `Phase.cycle(timeSec, frequencyHz, phaseOffset)`: Converts continuous time to normalized cyclic phase in `[0.0, 1.0)`.

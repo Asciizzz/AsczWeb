@@ -1,182 +1,395 @@
-// ================================================================
-//  Awgpu - Level 2: Composable Data Streams (StreamSet)
-// ================================================================
+import {
+	Buffer,
+	type BufferSlice,
+	isBufferSlice,
+	Texture,
+	getRegisteredTextureViewOwner,
+	resolveTextureView as resolveMemoryTextureView,
+} from "./memory.js";
+import { getResourceId } from "./device.js";
 
-import type { Buffer, BufferSlice } from "./memory.js";
+export type BufferSourceRef = Buffer | BufferSlice | GPUBuffer;
+export type TextureSourceRef = Texture | GPUTexture | GPUTextureView;
 
-export const VERTEX_FORMAT_SIZES: Record<string, number> = {
-    float32: 4,
-    float32x2: 8,
-    float32x3: 12,
-    float32x4: 16,
-    uint32: 4,
-    uint32x2: 8,
-    uint32x4: 16,
-    sint32: 4,
-    sint32x2: 8,
-    sint32x4: 16,
-    unorm8x4: 4,
-    snorm8x4: 4,
-    uint8x4: 4,
-    sint8x4: 4,
-    unorm16x2: 4,
-    snorm16x2: 4,
-    uint16x2: 4,
-    sint16x2: 4,
-    unorm16x4: 8,
-    snorm16x4: 8,
-    uint16x4: 8,
-    sint16x4: 8,
-    float16x2: 4,
-    float16x4: 8,
-};
+/**
+ * Valid WebGPU vertex attribute formats mapped to their byte sizes.
+ */
+export const VERTEX_FORMAT_BYTE_SIZES: Readonly<Record<string, number>> = Object.freeze({
+	"uint8x2": 2,
+	"uint8x4": 4,
+	"sint8x2": 2,
+	"sint8x4": 4,
+	"unorm8x2": 2,
+	"unorm8x4": 4,
+	"snorm8x2": 2,
+	"snorm8x4": 4,
+	"uint16x2": 4,
+	"uint16x4": 8,
+	"sint16x2": 4,
+	"sint16x4": 8,
+	"unorm16x2": 4,
+	"unorm16x4": 8,
+	"snorm16x2": 4,
+	"snorm16x4": 8,
+	"float16x2": 4,
+	"float16x4": 8,
+	"float32": 4,
+	"float32x2": 8,
+	"float32x3": 12,
+	"float32x4": 16,
+	"uint32": 4,
+	"uint32x2": 8,
+	"uint32x3": 12,
+	"uint32x4": 16,
+	"sint32": 4,
+	"sint32x2": 8,
+	"sint32x3": 12,
+	"sint32x4": 16,
+	"unorm10-10-10-2": 4,
+});
 
-export interface VertexStream {
-    slot: number;
-    shaderLocation?: number;
-    source: GPUBuffer | Buffer | BufferSlice;
-    format: GPUVertexFormat;
-    offset?: number;
-    stepMode?: GPUVertexStepMode;
-}
+export const VERTEX_FORMAT_SIZES = VERTEX_FORMAT_BYTE_SIZES;
 
-export interface IndexStream {
-    source: GPUBuffer | Buffer | BufferSlice;
-    format: GPUIndexFormat;
-    count: number;
-    offset?: number;
-    firstIndex?: number;
-    baseVertex?: number;
+/**
+ * Returns the byte size of a valid `GPUVertexFormat`, or throws an Error if the format is unrecognized.
+ */
+export function getVertexFormatByteSize(format: GPUVertexFormat): number {
+	const size = VERTEX_FORMAT_BYTE_SIZES[format as string];
+	if (size === undefined) {
+		throw new Error(`Unsupported or malformed GPUVertexFormat: '${String(format)}'.`);
+	}
+	return size;
 }
 
 /**
- * Domain-agnostic compound data stream descriptor.
- * Groups 1-N VertexStream definitions (slot, shaderLocation, buffer source, format) and an
- * optional IndexStream. Call deriveVertexLayouts() to produce (GPUVertexBufferLayout | null)[] for
- * pipeline compilation.
+ * Resolves a `Buffer`, `BufferSlice`, or raw `GPUBuffer` into `(buffer, offset, size)` without allocation
+ * when `out` is provided.
+ */
+export function resolveBuffer(
+	ref: BufferSourceRef,
+	out?: { buffer: GPUBuffer; offset: number; size: number }
+): { buffer: GPUBuffer; offset: number; size: number } {
+	const target = out ?? { buffer: null as unknown as GPUBuffer, offset: 0, size: 0 };
+	if (ref instanceof Buffer) {
+		target.buffer = ref.native;
+		target.offset = 0;
+		target.size = ref.size;
+	} else if (isBufferSlice(ref)) {
+		target.buffer = ref.buffer.native;
+		target.offset = ref.offset;
+		target.size = ref.size;
+	} else {
+		target.buffer = ref;
+		target.offset = 0;
+		target.size = ref.size;
+	}
+	return target;
+}
+
+/**
+ * Resolves a `Texture`, `GPUTexture`, or `GPUTextureView` into a `GPUTextureView`.
+ * For raw `GPUTexture` inputs, reuses a cached default view per `GPUTexture`.
+ */
+export function resolveTextureView(ref: TextureSourceRef): GPUTextureView {
+	return resolveMemoryTextureView(ref);
+}
+
+/**
+ * Resolves any buffer, slice, texture, or texture view into the logical backing resource ID
+ * of its underlying `GPUBuffer` or `GPUTexture` (when registered).
+ */
+export function resolveLogicalResourceId(res: object): number {
+	if (res instanceof Buffer) {
+		return getResourceId(res.native);
+	}
+	if (isBufferSlice(res)) {
+		return getResourceId(res.buffer.native);
+	}
+	if (res instanceof Texture) {
+		return getResourceId(res.native);
+	}
+	const ownerTex = getRegisteredTextureViewOwner(res as GPUTextureView);
+	if (ownerTex) {
+		return getResourceId(ownerTex);
+	}
+	return getResourceId(res);
+}
+
+/**
+ * Vertex attribute and buffer-slot stream descriptor.
+ *
+ * Offset separation contract:
+ * - `offset` is the attribute byte offset within a single vertex stride (`GPUVertexAttribute.offset`).
+ * - `bufferOffset` (defaults to 0) is an optional byte offset added to the source buffer/slice base offset
+ *   when binding the vertex buffer via `pass.setVertexBuffer`.
+ */
+export interface VertexStream {
+	/** Vertex buffer slot index (0..maxVertexBuffers-1). */
+	slot: number;
+	/** Shader attribute location (`@location(location)`). */
+	location: number;
+	/** Vertex attribute format (for example `"float32x3"`). */
+	format: GPUVertexFormat;
+	/** Backing buffer or buffer slice. */
+	source: BufferSourceRef;
+	/** Attribute byte offset within the vertex stride (`GPUVertexAttribute.offset`). Defaults to 0. */
+	offset?: number;
+	/** Optional additional byte offset applied when binding `source` in `setVertexBuffer`. Defaults to 0. */
+	bufferOffset?: number;
+	/** Explicit byte stride per vertex or instance. If omitted, derived from maximum attribute end in the slot. */
+	stride?: number;
+	/** Step mode (`"vertex"` or `"instance"`). Defaults to `"vertex"`. */
+	stepMode?: GPUVertexStepMode;
+}
+
+/**
+ * Index buffer stream descriptor.
+ */
+export interface IndexStream {
+	source: BufferSourceRef;
+	format: GPUIndexFormat;
+	/** Additional byte offset into `source` applied when binding the index buffer. Defaults to 0. */
+	offset?: number;
+	/** Optional default index count when not overridden on DrawBatch. */
+	count?: number;
+	/** Optional default firstIndex when not overridden on DrawBatch. */
+	firstIndex?: number;
+	/** Optional default baseVertex when not overridden on DrawBatch. */
+	baseVertex?: number;
+}
+
+/**
+ * Collection of vertex attribute streams and an optional index stream.
  */
 export class StreamSet {
-    readonly streams: VertexStream[] = [];
-    readonly slotStrides = new Map<number, number>();
-    indexStream?: IndexStream;
-    vertexCount?: number;
-    instanceCount = 1;
-    firstVertex = 0;
-    firstInstance = 0;
+	readonly vertexStreams: VertexStream[] = [];
+	indexStream: IndexStream | null = null;
+	vertexCount?: number;
+	instanceCount = 1;
+	firstVertex = 0;
+	firstInstance = 0;
 
-    /**
-     * Appends vertex buffer stream to the set.
-     * - slot: GPU buffer binding slot (setVertexBuffer index).
-     * - shaderLocation: WGSL @location attribute index. Defaults to slot for planar layouts.
-     *   Must be set explicitly for interleaved streams sharing the same slot.
-     */
-    addStream(
-        slot: number,
-        source: GPUBuffer | Buffer | BufferSlice,
-        format: GPUVertexFormat,
-        offset = 0,
-        stepMode: GPUVertexStepMode = "vertex",
-        shaderLocation?: number
-    ): this {
-        this.streams.push({
-            slot,
-            shaderLocation,
-            source,
-            format,
-            offset,
-            stepMode,
-        });
-        return this;
-    }
+	/** Alias for `vertexStreams`. */
+	get streams(): ReadonlyArray<VertexStream> {
+		return this.vertexStreams;
+	}
 
-    /**
-     * Configures explicit byte stride for a specific buffer slot.
-     * Overrides automatic stride calculation from attribute offsets.
-     */
-    setSlotStride(slot: number, stride: number): this {
-        this.slotStrides.set(slot, stride);
-        return this;
-    }
+	/**
+	 * Appends a validated `VertexStream` descriptor directly.
+	 */
+	add(stream: VertexStream): this {
+		if (!Number.isInteger(stream.slot) || stream.slot < 0) {
+			throw new RangeError(`StreamSet.add: slot must be a non-negative integer, got ${stream.slot}.`);
+		}
+		if (!Number.isInteger(stream.location) || stream.location < 0) {
+			throw new RangeError(`StreamSet.add: location must be a non-negative integer, got ${stream.location}.`);
+		}
+		const attrSize = getVertexFormatByteSize(stream.format);
+		const attrOffset = stream.offset ?? 0;
+		if (!Number.isInteger(attrOffset) || attrOffset < 0) {
+			throw new RangeError(`StreamSet.add: offset must be a non-negative integer, got ${attrOffset}.`);
+		}
+		const bufferOffset = stream.bufferOffset ?? 0;
+		if (!Number.isInteger(bufferOffset) || bufferOffset < 0) {
+			throw new RangeError(`StreamSet.add: bufferOffset must be a non-negative integer, got ${bufferOffset}.`);
+		}
+		if (stream.stride !== undefined) {
+			if (!Number.isInteger(stream.stride) || stream.stride < attrOffset + attrSize) {
+				throw new RangeError(
+					`StreamSet.add: stride (${stream.stride}) must be an integer >= offset + formatSize (${attrOffset + attrSize}).`
+				);
+			}
+		}
+		this.vertexStreams.push({
+			...stream,
+			offset: attrOffset,
+			bufferOffset,
+			stepMode: stream.stepMode ?? "vertex",
+		});
+		return this;
+	}
 
-    /**
-     * Configures the index buffer stream.
-     */
-    setIndices(
-        source: GPUBuffer | Buffer | BufferSlice,
-        format: GPUIndexFormat,
-        count: number,
-        offset = 0,
-        firstIndex = 0,
-        baseVertex = 0
-    ): this {
-        this.indexStream = {
-            source,
-            format,
-            count,
-            offset,
-            firstIndex,
-            baseVertex,
-        };
-        return this;
-    }
+	/**
+	 * Adds a tightly packed vertex buffer stream at `slot` and `location` where stride equals format size
+	 * and attribute offset is 0.
+	 */
+	addVertex(
+		slot: number,
+		location: number,
+		format: GPUVertexFormat,
+		source: BufferSourceRef,
+		stepMode: GPUVertexStepMode = "vertex"
+	): this {
+		if (!Number.isInteger(slot) || slot < 0) {
+			throw new RangeError(`StreamSet.addVertex: slot must be a non-negative integer, got ${slot}.`);
+		}
+		if (!Number.isInteger(location) || location < 0) {
+			throw new RangeError(`StreamSet.addVertex: location must be a non-negative integer, got ${location}.`);
+		}
+		const stride = getVertexFormatByteSize(format);
+		this.vertexStreams.push({
+			slot,
+			location,
+			format,
+			source,
+			offset: 0,
+			bufferOffset: 0,
+			stride,
+			stepMode,
+		});
+		return this;
+	}
 
-    /**
-     * Produces (GPUVertexBufferLayout | null)[] for pipeline compilation.
-     * Groups streams by slot, maps them to exact slot indices, computes cumulative byte
-     * offsets per attribute, and aligns arrayStride to a 4-byte boundary. Unused intermediate
-     * slots are populated with null to preserve slot-to-index alignment required by WebGPU.
-     */
-    deriveVertexLayouts(): (GPUVertexBufferLayout | null)[] {
-        if (this.streams.length === 0) return [];
+	/**
+	 * Adds an interleaved vertex attribute stream with explicit `byteOffset` (attribute offset within stride)
+	 * and `byteStride`.
+	 */
+	addInterleavedVertex(
+		slot: number,
+		location: number,
+		format: GPUVertexFormat,
+		source: BufferSourceRef,
+		byteOffset: number,
+		byteStride: number,
+		stepMode: GPUVertexStepMode = "vertex",
+		bufferOffset = 0
+	): this {
+		if (!Number.isInteger(slot) || slot < 0) {
+			throw new RangeError(`StreamSet.addInterleavedVertex: slot must be a non-negative integer, got ${slot}.`);
+		}
+		if (!Number.isInteger(location) || location < 0) {
+			throw new RangeError(`StreamSet.addInterleavedVertex: location must be a non-negative integer, got ${location}.`);
+		}
+		if (!Number.isInteger(byteOffset) || byteOffset < 0) {
+			throw new RangeError(`StreamSet.addInterleavedVertex: byteOffset must be a non-negative integer, got ${byteOffset}.`);
+		}
+		if (!Number.isInteger(byteStride) || byteStride < 0) {
+			throw new RangeError(`StreamSet.addInterleavedVertex: byteStride must be a non-negative integer, got ${byteStride}.`);
+		}
+		if (!Number.isInteger(bufferOffset) || bufferOffset < 0) {
+			throw new RangeError(`StreamSet.addInterleavedVertex: bufferOffset must be a non-negative integer, got ${bufferOffset}.`);
+		}
+		const attrSize = getVertexFormatByteSize(format);
+		if (byteOffset + attrSize > byteStride) {
+			throw new RangeError(
+				`StreamSet.addInterleavedVertex: attribute end (${byteOffset + attrSize}) exceeds byteStride (${byteStride}).`
+			);
+		}
+		this.vertexStreams.push({
+			slot,
+			location,
+			format,
+			source,
+			offset: byteOffset,
+			bufferOffset,
+			stride: byteStride,
+			stepMode,
+		});
+		return this;
+	}
 
-        // Group streams by buffer binding slot
-        const slotMap = new Map<number, VertexStream[]>();
-        let maxSlot = 0;
-        for (const s of this.streams) {
-            let list = slotMap.get(s.slot);
-            if (!list) {
-                list = [];
-                slotMap.set(s.slot, list);
-            }
-            list.push(s);
-            if (s.slot > maxSlot) maxSlot = s.slot;
-        }
+	/** Sets the index buffer stream. */
+	setIndex(
+		source: BufferSourceRef,
+		format: GPUIndexFormat = "uint32",
+		offset = 0,
+		count?: number,
+		firstIndex = 0,
+		baseVertex = 0
+	): this {
+		if (format !== "uint16" && format !== "uint32") {
+			throw new Error(`StreamSet.setIndex: invalid GPUIndexFormat '${String(format)}'.`);
+		}
+		if (!Number.isInteger(offset) || offset < 0) {
+			throw new RangeError(`StreamSet.setIndex: offset must be a non-negative integer, got ${offset}.`);
+		}
+		const align = format === "uint32" ? 4 : 2;
+		if (offset % align !== 0) {
+			throw new RangeError(
+				`StreamSet.setIndex: offset (${offset}) must be aligned to ${align} bytes for format '${format}'.`
+			);
+		}
+		this.indexStream = { source, format, offset, count, firstIndex, baseVertex };
+		return this;
+	}
 
-        const layouts: (GPUVertexBufferLayout | null)[] = new Array(maxSlot + 1).fill(null);
-        for (const [slot, streamList] of slotMap.entries()) {
-            let currentOffset = 0;
-            const attributes: GPUVertexAttribute[] = [];
-            let stepMode: GPUVertexStepMode = "vertex";
+	/** Alias for `deriveVertexLayouts()`. */
+	toBufferLayouts(): GPUVertexBufferLayout[] {
+		return this.deriveVertexLayouts();
+	}
 
-            for (let i = 0; i < streamList.length; i++) {
-                const stream = streamList[i];
-                stepMode = stream.stepMode ?? "vertex";
-                const offset = stream.offset ?? currentOffset;
-                // shaderLocation is the WGSL @location index and is independent of slot.
-                // For planar layouts (one attribute per slot), slot == shaderLocation by convention.
-                // For interleaved layouts, each attribute inside the slot gets a unique location.
-                const shaderLocation = stream.shaderLocation ?? (slot + i);
-                attributes.push({
-                    shaderLocation,
-                    format: stream.format,
-                    offset,
-                });
-                const size = VERTEX_FORMAT_SIZES[stream.format] ?? 4;
-                currentOffset = offset + size;
-            }
+	/**
+	 * Derives `GPUVertexBufferLayout[]` sorted by slot index.
+	 * Validates all attribute formats, offsets, and strides; derives stride from the maximum
+	 * attribute end (`offset + formatByteSize`) when explicit `stride` is omitted.
+	 */
+	deriveVertexLayouts(): GPUVertexBufferLayout[] {
+		const slotMap = new Map<number, VertexStream[]>();
+		for (let i = 0; i < this.vertexStreams.length; i++) {
+			const stream = this.vertexStreams[i];
+			if (!Number.isInteger(stream.slot) || stream.slot < 0) {
+				throw new RangeError(`Invalid vertex stream slot: ${stream.slot}.`);
+			}
+			let group = slotMap.get(stream.slot);
+			if (!group) {
+				group = [];
+				slotMap.set(stream.slot, group);
+			}
+			group.push(stream);
+		}
 
-            const explicitStride = this.slotStrides.get(slot);
-            const arrayStride = explicitStride !== undefined
-                ? Math.max(4, Math.ceil(explicitStride / 4) * 4)
-                : Math.max(4, Math.ceil(currentOffset / 4) * 4);
+		const sortedSlots = Array.from(slotMap.keys()).sort((a, b) => a - b);
+		const layouts: GPUVertexBufferLayout[] = [];
 
-            layouts[slot] = {
-                arrayStride,
-                stepMode,
-                attributes,
-            };
-        }
+		for (const slot of sortedSlots) {
+			const group = slotMap.get(slot)!;
+			const attributes: GPUVertexAttribute[] = [];
+			let maxAttrEnd = 0;
+			let explicitStride: number | undefined;
+			let stepMode: GPUVertexStepMode = group[0].stepMode ?? "vertex";
 
-        return layouts;
-    }
+			for (const stream of group) {
+				const attrSize = getVertexFormatByteSize(stream.format);
+				const attrOffset = stream.offset ?? 0;
+				if (!Number.isInteger(attrOffset) || attrOffset < 0) {
+					throw new RangeError(`Invalid vertex attribute offset: ${attrOffset}.`);
+				}
+				const attrEnd = attrOffset + attrSize;
+				if (attrEnd > maxAttrEnd) {
+					maxAttrEnd = attrEnd;
+				}
+				if (stream.stride !== undefined) {
+					if (!Number.isInteger(stream.stride) || stream.stride < 0) {
+						throw new RangeError(`Invalid vertex stream stride: ${stream.stride}.`);
+					}
+					if (explicitStride !== undefined && explicitStride !== stream.stride) {
+						throw new Error(
+							`Conflicting explicit strides (${explicitStride} vs ${stream.stride}) in vertex buffer slot ${slot}.`
+						);
+					}
+					explicitStride = stream.stride;
+				}
+				attributes.push({
+					shaderLocation: stream.location,
+					offset: attrOffset,
+					format: stream.format,
+				});
+			}
+
+			const finalStride = explicitStride ?? maxAttrEnd;
+			if (finalStride < maxAttrEnd) {
+				throw new RangeError(
+					`Explicit vertex stride (${finalStride}) in slot ${slot} is smaller than maximum attribute end (${maxAttrEnd}).`
+				);
+			}
+
+			layouts.push({
+				arrayStride: finalStride,
+				stepMode,
+				attributes,
+			});
+		}
+
+		return layouts;
+	}
 }

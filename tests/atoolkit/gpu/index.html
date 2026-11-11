@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Atoolkit WebGPU integration test</title>
+<pre id="result">Running WebGPU checks...</pre>
+<script type="module">
+	const result = document.querySelector("#result");
+	try {
+		const { checkDevice } = await import("./dist/tests/atoolkit/gpu/check-device.js");
+		result.textContent = "PASS: " + await checkDevice();
+	} catch (error) {
+		result.textContent = "FAIL: " + (error.stack ?? error);
+	}
+	if (location.hash) {
+		await fetch("/result/" + location.hash.slice(1), { method: "POST", body: result.textContent });
+	}
+</script>

@@ -1,469 +1,642 @@
-// ================================================================
-//  Awgpu - Level 4: Hardware Pipelines (RasterPipeline, ComputePipeline)
-// ================================================================
-
-import { type Device, resolveDevice } from "./device.js";
-import type { StreamSet } from "./stream.js";
+import { type Device, resolveDevice, getResourceId } from "./device.js";
 import type { BindLayout } from "./binding.js";
+import type { StreamSet } from "./stream.js";
+import type { BlendState, DepthStencilState, RasterState } from "./state.js";
 
-export interface ShaderMessage {
-    type: "error" | "warning" | "info";
-    stage: "vertex" | "fragment" | "compute";
-    message: string;
-    lineNum: number;
-    linePos: number;
-    offset: number;
-    length: number;
+export interface ShaderStageConfig {
+	code: string;
+	entryPoint?: string;
+	constants?: Record<string, number>;
 }
 
-export interface RasterPipelineDesc {
-    label?: string;
-    vertex: {
-        code: string;
-        entryPoint?: string;
-        buffers?: (GPUVertexBufferLayout | null)[];
-    };
-    fragment?: {
-        code?: string;
-        entryPoint?: string;
-        targets: GPUColorTargetState[];
-    };
-    streamSet?: StreamSet;
-    layouts?: (GPUBindGroupLayout | BindLayout | null)[];
-    depthStencil?: GPUDepthStencilState;
-    primitive?: GPUPrimitiveState;
-    multisample?: GPUMultisampleState;
-    onShaderMessage?: (msg: ShaderMessage) => void;
+export interface ColorTargetConfig {
+	format: GPUTextureFormat;
+	blend?: GPUBlendState | BlendState;
+	writeMask?: GPUColorWriteFlags;
 }
 
-export interface ComputePipelineDesc {
-    label?: string;
-    code: string;
-    entryPoint?: string;
-    layouts?: (GPUBindGroupLayout | BindLayout | null)[];
-    onShaderMessage?: (msg: ShaderMessage) => void;
+export interface ShaderDiagnosticMessage {
+	type: GPUCompilationMessageType;
+	message: string;
+	lineNum: number;
+	linePos: number;
+	offset: number;
+	length: number;
+	stage: "vertex" | "fragment" | "compute";
 }
 
-function reportShaderMessages(
-    module: GPUShaderModule,
-    stage: "vertex" | "fragment" | "compute",
-    onMessage?: (msg: ShaderMessage) => void
-): void {
-    if (!onMessage) return;
-    module.getCompilationInfo().then((info) => {
-        for (const msg of info.messages) {
-            onMessage({
-                type: msg.type as "error" | "warning" | "info",
-                stage,
-                message: msg.message,
-                lineNum: msg.lineNum,
-                linePos: msg.linePos,
-                offset: msg.offset,
-                length: msg.length,
-            });
-        }
-    });
+export type ShaderDiagnosticCallback = (msg: ShaderDiagnosticMessage) => void;
+export type ShaderMessage = ShaderDiagnosticMessage;
+export type RasterPipelineDesc = RasterPipelineDescriptor;
+export type ComputePipelineDesc = ComputePipelineDescriptor;
+
+export interface RasterPipelineDescriptor {
+	label?: string;
+	layouts?: (BindLayout | GPUBindGroupLayout | null | undefined)[];
+	vertex: ShaderStageConfig & {
+		buffers?: GPUVertexBufferLayout[];
+	};
+	fragment?: ShaderStageConfig & {
+		targets: ColorTargetConfig[];
+	};
+	/**
+	 * Optional StreamSet from which vertex buffer layouts are derived.
+	 * Mutually exclusive with `vertex.buffers`; specifying both throws an Error.
+	 */
+	streamSet?: StreamSet;
+	primitive?: RasterState | GPUPrimitiveState;
+	depthStencil?: DepthStencilState | GPUDepthStencilState;
+	multisample?: GPUMultisampleState;
+	/**
+	 * Optional callback invoked with shader compilation messages when the pipeline is compiled.
+	 * Note: on a synchronous or asynchronous cache hit, compilation is not re-executed.
+	 */
+	onShaderMessage?: ShaderDiagnosticCallback;
+}
+
+export interface ComputePipelineDescriptor {
+	label?: string;
+	layouts?: (BindLayout | GPUBindGroupLayout | null | undefined)[];
+	compute: ShaderStageConfig;
+	onShaderMessage?: ShaderDiagnosticCallback;
+}
+
+async function inspectShaderModule(
+	module: GPUShaderModule,
+	stage: "vertex" | "fragment" | "compute",
+	callback?: ShaderDiagnosticCallback
+): Promise<void> {
+	if (!callback || typeof module.getCompilationInfo !== "function") return;
+	try {
+		const info = await module.getCompilationInfo();
+		for (const msg of info.messages) {
+			callback({
+				type: msg.type,
+				message: msg.message,
+				lineNum: msg.lineNum,
+				linePos: msg.linePos,
+				offset: msg.offset,
+				length: msg.length,
+				stage,
+			});
+		}
+	} catch {
+		// Ignore environments that do not implement getCompilationInfo.
+	}
+}
+
+function serializeConstants(constants?: Record<string, number>): string {
+	if (!constants) return "";
+	const keys = Object.keys(constants).sort();
+	if (keys.length === 0) return "";
+	const parts: string[] = [];
+	for (let i = 0; i < keys.length; i++) {
+		const k = keys[i];
+		parts.push(`${JSON.stringify(k)}:${constants[k]}`);
+	}
+	return parts.join(",");
+}
+
+function resolveVertexBufferLayouts(desc: RasterPipelineDescriptor): GPUVertexBufferLayout[] {
+	if (desc.streamSet !== undefined && desc.vertex.buffers !== undefined) {
+		throw new Error(
+			"RasterPipeline: 'streamSet' and 'vertex.buffers' are mutually exclusive; specify only one."
+		);
+	}
+	if (desc.streamSet !== undefined) {
+		return desc.streamSet.deriveVertexLayouts();
+	}
+	return desc.vertex.buffers ? [...desc.vertex.buffers] : [];
+}
+
+function serializeVertexBufferLayouts(buffers: GPUVertexBufferLayout[]): string {
+	const parts: string[] = [];
+	for (let i = 0; i < buffers.length; i++) {
+		const b = buffers[i];
+		if (!b) {
+			parts.push("null");
+			continue;
+		}
+		const attrs = Array.from(b.attributes).map(
+			(a) => `${a.shaderLocation}@${a.offset}:${a.format}`
+		);
+		parts.push(`${b.arrayStride}:${b.stepMode ?? "vertex"}:[${attrs.join(",")}]`);
+	}
+	return parts.join(";");
+}
+
+function serializeBlendComponent(c?: GPUBlendComponent): string {
+	if (!c) return "default";
+	return `${c.operation ?? "add"}:${c.srcFactor ?? "one"}:${c.dstFactor ?? "zero"}`;
+}
+
+function serializeTargets(targets: ColorTargetConfig[]): string {
+	return targets
+		.map((t) => {
+			const blendStr = t.blend
+				? `${serializeBlendComponent(t.blend.color)}/${serializeBlendComponent(t.blend.alpha)}`
+				: "none";
+			return `${t.format}:${t.writeMask ?? 0xf}:${blendStr}`;
+		})
+		.join(";");
+}
+
+function serializeStencilFace(s?: GPUStencilFaceState): string {
+	if (!s) return "default";
+	return `${s.compare ?? "always"}:${s.failOp ?? "keep"}:${s.depthFailOp ?? "keep"}:${s.passOp ?? "keep"}`;
+}
+
+function serializeDepthStencil(ds?: DepthStencilState | GPUDepthStencilState): string {
+	if (!ds) return "none";
+	return [
+		ds.format,
+		ds.depthWriteEnabled ?? false,
+		ds.depthCompare ?? "always",
+		serializeStencilFace(ds.stencilFront),
+		serializeStencilFace(ds.stencilBack),
+		ds.stencilReadMask ?? 0xffffffff,
+		ds.stencilWriteMask ?? 0xffffffff,
+		ds.depthBias ?? 0,
+		ds.depthBiasSlopeScale ?? 0,
+		ds.depthBiasClamp ?? 0,
+	].join(":");
+}
+
+function serializePrimitive(p?: RasterState | GPUPrimitiveState): string {
+	const topology = p?.topology ?? "triangle-list";
+	const strip = p?.stripIndexFormat ?? "none";
+	const frontFace = p?.frontFace ?? "ccw";
+	const cullMode = p?.cullMode ?? "none";
+	const unclipped = (p as GPUPrimitiveState | undefined)?.unclippedDepth ?? false;
+	return `${topology}:${strip}:${frontFace}:${cullMode}:${unclipped}`;
+}
+
+function serializeMultisample(ms?: GPUMultisampleState): string {
+	return `${ms?.count ?? 1}:${ms?.mask ?? 0xffffffff}:${ms?.alphaToCoverageEnabled ?? false}`;
+}
+
+function serializeLayouts(layouts?: (BindLayout | GPUBindGroupLayout | null | undefined)[]): string {
+	if (!layouts || layouts.length === 0) return "auto";
+	return layouts
+		.map((l) => {
+			if (!l) return "null";
+			const raw = "native" in l ? l.native : l;
+			return String(getResourceId(raw));
+		})
+		.join(",");
 }
 
 /**
- * WebGPU render pipeline wrapper for rasterization and depth prepasses.
+ * Normalizes a `RasterPipelineDescriptor` and produces its canonical cache key for `rawDevice`.
+ */
+export function normalizeRasterDescriptor(
+	rawDevice: GPUDevice,
+	desc: RasterPipelineDescriptor
+): { vertexBuffers: GPUVertexBufferLayout[]; key: string } {
+	const vertexBuffers = resolveVertexBufferLayouts(desc);
+	const vsEntry = desc.vertex.entryPoint ?? "vs_main";
+	const vsConsts = serializeConstants(desc.vertex.constants);
+	const vbKey = serializeVertexBufferLayouts(vertexBuffers);
+
+	const fsKey = desc.fragment
+		? [
+				JSON.stringify(desc.fragment.code),
+				desc.fragment.entryPoint ?? "fs_main",
+				serializeConstants(desc.fragment.constants),
+				serializeTargets(desc.fragment.targets),
+			].join("|")
+		: "no-fragment";
+
+	const key = [
+		`D:${getResourceId(rawDevice)}`,
+		`L:${serializeLayouts(desc.layouts)}`,
+		`VS:${JSON.stringify(desc.vertex.code)}|${vsEntry}|${vsConsts}`,
+		`VB:${vbKey}`,
+		`FS:${fsKey}`,
+		`P:${serializePrimitive(desc.primitive)}`,
+		`DS:${serializeDepthStencil(desc.depthStencil)}`,
+		`MS:${serializeMultisample(desc.multisample)}`,
+	].join("||");
+
+	return { vertexBuffers, key };
+}
+
+/**
+ * Normalizes a `ComputePipelineDescriptor` and produces its canonical cache key for `rawDevice`.
+ */
+export function normalizeComputeDescriptor(
+	rawDevice: GPUDevice,
+	desc: ComputePipelineDescriptor
+): { key: string } {
+	const entry = desc.compute.entryPoint ?? "cs_main";
+	const consts = serializeConstants(desc.compute.constants);
+	const key = [
+		`D:${getResourceId(rawDevice)}`,
+		`L:${serializeLayouts(desc.layouts)}`,
+		`CS:${JSON.stringify(desc.compute.code)}|${entry}|${consts}`,
+	].join("||");
+	return { key };
+}
+
+/**
+ * Wrapper around a WebGPU `GPURenderPipeline`.
  */
 export class RasterPipeline {
-    readonly native: GPURenderPipeline;
-    readonly layout?: GPUPipelineLayout;
-    readonly hasFragmentStage: boolean;
-    readonly label: string;
+	readonly native: GPURenderPipeline;
+	readonly label?: string;
 
-    constructor(
-        native: GPURenderPipeline,
-        hasFragmentStage: boolean,
-        layout?: GPUPipelineLayout,
-        label = "RasterPipeline"
-    ) {
-        this.native = native;
-        this.hasFragmentStage = hasFragmentStage;
-        this.layout = layout;
-        this.label = label;
-    }
+	private constructor(native: GPURenderPipeline, label?: string) {
+		this.native = native;
+		this.label = label;
+	}
 
-    private static _buildDescriptor(gpu: GPUDevice, desc: RasterPipelineDesc): {
-        nativeDesc: GPURenderPipelineDescriptor;
-        hasFragmentStage: boolean;
-        pipelineLayout: GPUPipelineLayout | "auto";
-        label: string;
-    } {
-        const label = desc.label ?? "RasterPipeline";
+	private static _buildDescriptor(
+		rawDevice: GPUDevice,
+		desc: RasterPipelineDescriptor,
+		vertexBuffers: GPUVertexBufferLayout[]
+	): GPURenderPipelineDescriptor {
+		let pipelineLayout: GPUPipelineLayout | "auto" = "auto";
+		if (desc.layouts && desc.layouts.length > 0) {
+			const bindGroupLayouts = desc.layouts.map((l) => (l ? ("native" in l ? l.native : l) : null));
+			pipelineLayout = rawDevice.createPipelineLayout({
+				label: desc.label ? `${desc.label}_Layout` : undefined,
+				bindGroupLayouts,
+			});
+		}
 
-        // 1. Vertex Shader Module
-        const vsModule = gpu.createShaderModule({
-            label: `${label}_VS`,
-            code: desc.vertex.code,
-        });
-        reportShaderMessages(vsModule, "vertex", desc.onShaderMessage);
+		const vertexModule = rawDevice.createShaderModule({
+			label: desc.label ? `${desc.label}_VS` : undefined,
+			code: desc.vertex.code,
+		});
+		if (desc.onShaderMessage) {
+			inspectShaderModule(vertexModule, "vertex", desc.onShaderMessage);
+		}
 
-        // 2. Vertex Buffer Layouts
-        let vertexBuffers = desc.vertex.buffers ?? [];
-        if (desc.streamSet) {
-            vertexBuffers = desc.streamSet.deriveVertexLayouts();
-        }
+		let fragmentState: GPUFragmentState | undefined;
+		if (desc.fragment) {
+			const isSameCode = desc.fragment.code === desc.vertex.code;
+			const fragmentModule = isSameCode
+				? vertexModule
+				: rawDevice.createShaderModule({
+						label: desc.label ? `${desc.label}_FS` : undefined,
+						code: desc.fragment.code,
+					});
 
-        // 3. Pipeline Layout with Automatic Empty Slot Sanitization
-        let pipelineLayout: GPUPipelineLayout | "auto" = "auto";
-        if (desc.layouts && desc.layouts.length > 0) {
-            let emptyLayout: GPUBindGroupLayout | null = null;
-            const sanitizedLayouts = desc.layouts.map((l) => {
-                if (!l) {
-                    if (!emptyLayout) {
-                        emptyLayout = gpu.createBindGroupLayout({
-                            label: `${label}_EmptySlot`,
-                            entries: [],
-                        });
-                    }
-                    return emptyLayout;
-                }
-                return "native" in l ? l.native : l;
-            });
+			if (!isSameCode && desc.onShaderMessage) {
+				inspectShaderModule(fragmentModule, "fragment", desc.onShaderMessage);
+			}
 
-            pipelineLayout = gpu.createPipelineLayout({
-                label: `${label}_Layout`,
-                bindGroupLayouts: sanitizedLayouts,
-            });
-        }
+			fragmentState = {
+				module: fragmentModule,
+				entryPoint: desc.fragment.entryPoint ?? "fs_main",
+				constants: desc.fragment.constants,
+				targets: desc.fragment.targets.map((t) => ({
+					format: t.format,
+					blend: t.blend,
+					writeMask: t.writeMask ?? 0xf,
+				})),
+			};
+		}
 
-        // 4. Native Pipeline Descriptor
-        const nativeDesc: GPURenderPipelineDescriptor = {
-            label,
-            layout: pipelineLayout,
-            vertex: {
-                module: vsModule,
-                entryPoint: desc.vertex.entryPoint ?? "vs_main",
-                buffers: vertexBuffers,
-            },
-            primitive: desc.primitive ?? {
-                topology: "triangle-list",
-                cullMode: "none",
-            },
-        };
+		return {
+			label: desc.label,
+			layout: pipelineLayout,
+			vertex: {
+				module: vertexModule,
+				entryPoint: desc.vertex.entryPoint ?? "vs_main",
+				constants: desc.vertex.constants,
+				buffers: vertexBuffers,
+			},
+			fragment: fragmentState,
+			primitive: desc.primitive ?? {
+				topology: "triangle-list",
+				cullMode: "back",
+				frontFace: "ccw",
+			},
+			depthStencil: desc.depthStencil,
+			multisample: desc.multisample ?? { count: 1 },
+		};
+	}
 
-        if (desc.depthStencil) {
-            nativeDesc.depthStencil = desc.depthStencil;
-        }
+	static create(device: Device | GPUDevice, desc: RasterPipelineDescriptor): RasterPipeline {
+		const rawDevice = resolveDevice(device);
+		const vertexBuffers = resolveVertexBufferLayouts(desc);
+		const gpuDesc = RasterPipeline._buildDescriptor(rawDevice, desc, vertexBuffers);
+		const native = rawDevice.createRenderPipeline(gpuDesc);
+		return new RasterPipeline(native, desc.label);
+	}
 
-        if (desc.multisample) {
-            nativeDesc.multisample = desc.multisample;
-        }
+	static async createAsync(
+		device: Device | GPUDevice,
+		desc: RasterPipelineDescriptor
+	): Promise<RasterPipeline> {
+		const rawDevice = resolveDevice(device);
+		const vertexBuffers = resolveVertexBufferLayouts(desc);
+		const gpuDesc = RasterPipeline._buildDescriptor(rawDevice, desc, vertexBuffers);
+		const native = await rawDevice.createRenderPipelineAsync(gpuDesc);
+		return new RasterPipeline(native, desc.label);
+	}
 
-        // 5. Fragment Stage (Optional for depth-only passes)
-        const hasFragmentStage = !!desc.fragment;
-        if (desc.fragment) {
-            const fsCode = desc.fragment.code ?? desc.vertex.code;
-            const fsModule =
-                fsCode === desc.vertex.code
-                    ? vsModule
-                    : gpu.createShaderModule({
-                          label: `${label}_FS`,
-                          code: fsCode,
-                      });
-
-            if (fsModule !== vsModule) {
-                reportShaderMessages(fsModule, "fragment", desc.onShaderMessage);
-            }
-
-            nativeDesc.fragment = {
-                module: fsModule,
-                entryPoint: desc.fragment.entryPoint ?? "fs_main",
-                targets: desc.fragment.targets,
-            };
-        }
-
-        return { nativeDesc, hasFragmentStage, pipelineLayout, label };
-    }
-
-    /**
-     * Factory: Compiles shaders and instantiates GPURenderPipeline with automatic layout derivation.
-     */
-    static create(device: Device | GPUDevice, desc: RasterPipelineDesc): RasterPipeline {
-        const gpu = resolveDevice(device);
-        const { nativeDesc, hasFragmentStage, pipelineLayout, label } = RasterPipeline._buildDescriptor(gpu, desc);
-        const native = gpu.createRenderPipeline(nativeDesc);
-        return new RasterPipeline(
-            native,
-            hasFragmentStage,
-            pipelineLayout === "auto" ? undefined : pipelineLayout,
-            label
-        );
-    }
-
-    /**
-     * Factory: Asynchronously compiles shaders and instantiates GPURenderPipeline.
-     */
-    static async createAsync(device: Device | GPUDevice, desc: RasterPipelineDesc): Promise<RasterPipeline> {
-        const gpu = resolveDevice(device);
-        const { nativeDesc, hasFragmentStage, pipelineLayout, label } = RasterPipeline._buildDescriptor(gpu, desc);
-        const native = await gpu.createRenderPipelineAsync(nativeDesc);
-        return new RasterPipeline(
-            native,
-            hasFragmentStage,
-            pipelineLayout === "auto" ? undefined : pipelineLayout,
-            label
-        );
-    }
+	getBindGroupLayout(index: number): GPUBindGroupLayout {
+		return this.native.getBindGroupLayout(index);
+	}
 }
 
 /**
- * WebGPU compute pipeline wrapper.
+ * Wrapper around a WebGPU `GPUComputePipeline`.
  */
 export class ComputePipeline {
-    readonly native: GPUComputePipeline;
-    readonly layout?: GPUPipelineLayout;
-    readonly label: string;
+	readonly native: GPUComputePipeline;
+	readonly label?: string;
 
-    constructor(native: GPUComputePipeline, layout?: GPUPipelineLayout, label = "ComputePipeline") {
-        this.native = native;
-        this.layout = layout;
-        this.label = label;
-    }
+	private constructor(native: GPUComputePipeline, label?: string) {
+		this.native = native;
+		this.label = label;
+	}
 
-    private static _buildDescriptor(gpu: GPUDevice, desc: ComputePipelineDesc): {
-        nativeDesc: GPUComputePipelineDescriptor;
-        pipelineLayout: GPUPipelineLayout | "auto";
-        label: string;
-    } {
-        const label = desc.label ?? "ComputePipeline";
+	private static _buildDescriptor(
+		rawDevice: GPUDevice,
+		desc: ComputePipelineDescriptor
+	): GPUComputePipelineDescriptor {
+		let pipelineLayout: GPUPipelineLayout | "auto" = "auto";
+		if (desc.layouts && desc.layouts.length > 0) {
+			const bindGroupLayouts = desc.layouts.map((l) => (l ? ("native" in l ? l.native : l) : null));
+			pipelineLayout = rawDevice.createPipelineLayout({
+				label: desc.label ? `${desc.label}_Layout` : undefined,
+				bindGroupLayouts,
+			});
+		}
 
-        const csModule = gpu.createShaderModule({
-            label: `${label}_CS`,
-            code: desc.code,
-        });
-        reportShaderMessages(csModule, "compute", desc.onShaderMessage);
+		const computeModule = rawDevice.createShaderModule({
+			label: desc.label ? `${desc.label}_CS` : undefined,
+			code: desc.compute.code,
+		});
+		if (desc.onShaderMessage) {
+			inspectShaderModule(computeModule, "compute", desc.onShaderMessage);
+		}
 
-        let pipelineLayout: GPUPipelineLayout | "auto" = "auto";
-        if (desc.layouts && desc.layouts.length > 0) {
-            let emptyLayout: GPUBindGroupLayout | null = null;
-            const sanitizedLayouts = desc.layouts.map((l) => {
-                if (!l) {
-                    if (!emptyLayout) {
-                        emptyLayout = gpu.createBindGroupLayout({
-                            label: `${label}_EmptySlot`,
-                            entries: [],
-                        });
-                    }
-                    return emptyLayout;
-                }
-                return "native" in l ? l.native : l;
-            });
+		return {
+			label: desc.label,
+			layout: pipelineLayout,
+			compute: {
+				module: computeModule,
+				entryPoint: desc.compute.entryPoint ?? "cs_main",
+				constants: desc.compute.constants,
+			},
+		};
+	}
 
-            pipelineLayout = gpu.createPipelineLayout({
-                label: `${label}_Layout`,
-                bindGroupLayouts: sanitizedLayouts,
-            });
-        }
+	static create(device: Device | GPUDevice, desc: ComputePipelineDescriptor): ComputePipeline {
+		const rawDevice = resolveDevice(device);
+		const gpuDesc = ComputePipeline._buildDescriptor(rawDevice, desc);
+		const native = rawDevice.createComputePipeline(gpuDesc);
+		return new ComputePipeline(native, desc.label);
+	}
 
-        const nativeDesc: GPUComputePipelineDescriptor = {
-            label,
-            layout: pipelineLayout,
-            compute: {
-                module: csModule,
-                entryPoint: desc.entryPoint ?? "cs_main",
-            },
-        };
+	static async createAsync(
+		device: Device | GPUDevice,
+		desc: ComputePipelineDescriptor
+	): Promise<ComputePipeline> {
+		const rawDevice = resolveDevice(device);
+		const gpuDesc = ComputePipeline._buildDescriptor(rawDevice, desc);
+		const native = await rawDevice.createComputePipelineAsync(gpuDesc);
+		return new ComputePipeline(native, desc.label);
+	}
 
-        return { nativeDesc, pipelineLayout, label };
-    }
-
-    /**
-     * Factory: Compiles compute shader and instantiates GPUComputePipeline.
-     */
-    static create(device: Device | GPUDevice, desc: ComputePipelineDesc): ComputePipeline {
-        const gpu = resolveDevice(device);
-        const { nativeDesc, pipelineLayout, label } = ComputePipeline._buildDescriptor(gpu, desc);
-        const native = gpu.createComputePipeline(nativeDesc);
-        return new ComputePipeline(
-            native,
-            pipelineLayout === "auto" ? undefined : pipelineLayout,
-            label
-        );
-    }
-
-    /**
-     * Factory: Asynchronously compiles compute shader and instantiates GPUComputePipeline.
-     */
-    static async createAsync(device: Device | GPUDevice, desc: ComputePipelineDesc): Promise<ComputePipeline> {
-        const gpu = resolveDevice(device);
-        const { nativeDesc, pipelineLayout, label } = ComputePipeline._buildDescriptor(gpu, desc);
-        const native = await gpu.createComputePipelineAsync(nativeDesc);
-        return new ComputePipeline(
-            native,
-            pipelineLayout === "auto" ? undefined : pipelineLayout,
-            label
-        );
-    }
+	getBindGroupLayout(index: number): GPUBindGroupLayout {
+		return this.native.getBindGroupLayout(index);
+	}
 }
 
-function hashPipelineString(str: string): string {
-    let h = 2166136261 >>> 0;
-    for (let i = 0; i < str.length; i++) {
-        h = Math.imul(h ^ str.charCodeAt(i), 16777619) >>> 0;
-    }
-    return h.toString(36);
-}
-
-let _nextPipelineLayoutId = 1;
-const _pipelineLayoutIdMap = new WeakMap<GPUBindGroupLayout, number>();
-
-function getBindGroupLayoutId(layout: GPUBindGroupLayout | BindLayout | null | undefined): number {
-    if (!layout) return 0;
-    const raw = "native" in layout ? layout.native : layout;
-    let id = _pipelineLayoutIdMap.get(raw);
-    if (id === undefined) {
-        id = _nextPipelineLayoutId++;
-        _pipelineLayoutIdMap.set(raw, id);
-    }
-    return id;
+interface DevicePipelineStore {
+	readonly raster: Map<string, RasterPipeline>;
+	readonly compute: Map<string, ComputePipeline>;
+	readonly rasterInFlight: Map<string, Promise<RasterPipeline>>;
+	readonly computeInFlight: Map<string, Promise<ComputePipeline>>;
 }
 
 /**
- * Cache preventing redundant driver recompilation of identical pipelines.
+ * Device-scoped `RasterPipeline` and `ComputePipeline` cache with normalized descriptor keys,
+ * in-flight async compilation deduplication, and generation-safe clearing.
+ *
+ * Ownership contract:
+ * - Can be constructed bound to a single `GPUDevice` (`new PipelineCache(device)`) or unbound
+ *   (`new PipelineCache()`), in which case entries are partitioned per `GPUDevice`.
+ * - A pipeline created on one `GPUDevice` is never returned for another `GPUDevice`.
+ * - Concurrent `getOrCreateRasterAsync` / `getOrCreateComputeAsync` calls for an identical normalized
+ *   descriptor share one in-flight compilation promise. Failed compilations are evicted so retries work.
+ * - `clear()` / `dispose()` increments the cache generation so in-flight compilations started prior to
+ *   `clear()` cannot repopulate the cache after completion.
  */
 export class PipelineCache {
-    private static _defaultInstance?: PipelineCache;
+	readonly #boundDevice: GPUDevice | null = null;
+	readonly #stores = new WeakMap<GPUDevice, DevicePipelineStore>();
+	readonly #knownDevices = new Set<GPUDevice>();
+	#generation = 0;
 
-    static get default(): PipelineCache {
-        if (!PipelineCache._defaultInstance) {
-            PipelineCache._defaultInstance = new PipelineCache();
-        }
-        return PipelineCache._defaultInstance;
-    }
+	constructor(device?: Device | GPUDevice) {
+		if (device !== undefined) {
+			this.#boundDevice = resolveDevice(device);
+		}
+	}
 
-    private _rasterPipelines = new Map<string, RasterPipeline>();
-    private _computePipelines = new Map<string, ComputePipeline>();
+	/** Bound native `GPUDevice` if constructed for a specific device, or null. */
+	get device(): GPUDevice | null {
+		return this.#boundDevice;
+	}
 
-    /**
-     * Computes deterministic hash key for RasterPipelineDesc.
-     */
-    static hashRasterDesc(desc: RasterPipelineDesc): string {
-        const vsHash = hashPipelineString(desc.vertex.code);
-        const vsEp = desc.vertex.entryPoint ?? "vs_main";
+	/** Total number of resolved raster pipelines currently cached. */
+	get rasterCount(): number {
+		let total = 0;
+		for (const dev of this.#knownDevices) {
+			const s = this.#stores.get(dev);
+			if (s) total += s.raster.size;
+		}
+		return total;
+	}
 
-        let vBuffers = "";
-        if (desc.vertex.buffers) {
-            vBuffers = JSON.stringify(desc.vertex.buffers);
-        } else if (desc.streamSet) {
-            vBuffers = JSON.stringify(desc.streamSet.deriveVertexLayouts());
-        }
+	/** Total number of resolved compute pipelines currently cached. */
+	get computeCount(): number {
+		let total = 0;
+		for (const dev of this.#knownDevices) {
+			const s = this.#stores.get(dev);
+			if (s) total += s.compute.size;
+		}
+		return total;
+	}
 
-        let fsKey = "none";
-        if (desc.fragment) {
-            const fsCode = desc.fragment.code ?? desc.vertex.code;
-            const fsHash = hashPipelineString(fsCode);
-            const fsEp = desc.fragment.entryPoint ?? "fs_main";
-            fsKey = `${fsHash}:${fsEp}:${JSON.stringify(desc.fragment.targets)}`;
-        }
+	#getStore(device: Device | GPUDevice): { rawDevice: GPUDevice; store: DevicePipelineStore } {
+		const rawDevice = resolveDevice(device);
+		if (this.#boundDevice !== null && this.#boundDevice !== rawDevice) {
+			throw new Error("PipelineCache: device argument does not match the cache's bound GPUDevice.");
+		}
+		let store = this.#stores.get(rawDevice);
+		if (!store) {
+			store = {
+				raster: new Map<string, RasterPipeline>(),
+				compute: new Map<string, ComputePipeline>(),
+				rasterInFlight: new Map<string, Promise<RasterPipeline>>(),
+				computeInFlight: new Map<string, Promise<ComputePipeline>>(),
+			};
+			this.#stores.set(rawDevice, store);
+			this.#knownDevices.add(rawDevice);
+		}
+		return { rawDevice, store };
+	}
 
-        let layoutsKey = "auto";
-        if (desc.layouts && desc.layouts.length > 0) {
-            layoutsKey = "";
-            for (let i = 0; i < desc.layouts.length; i++) {
-                if (i > 0) layoutsKey += ",";
-                layoutsKey += getBindGroupLayoutId(desc.layouts[i]);
-            }
-        }
+	getOrCreateRaster(device: Device | GPUDevice, desc: RasterPipelineDescriptor): RasterPipeline {
+		const { rawDevice, store } = this.#getStore(device);
+		const { key } = normalizeRasterDescriptor(rawDevice, desc);
 
-        const dsKey = desc.depthStencil ? JSON.stringify(desc.depthStencil) : "";
-        const primKey = desc.primitive ? JSON.stringify(desc.primitive) : "";
-        const msKey = desc.multisample ? JSON.stringify(desc.multisample) : "";
+		const existing = store.raster.get(key);
+		if (existing !== undefined) {
+			return existing;
+		}
 
-        return `r:${vsHash}:${vsEp};b:${vBuffers};f:${fsKey};l:${layoutsKey};d:${dsKey};p:${primKey};m:${msKey}`;
-    }
+		const pipeline = RasterPipeline.create(rawDevice, desc);
+		store.raster.set(key, pipeline);
+		return pipeline;
+	}
 
-    /**
-     * Computes deterministic hash key for ComputePipelineDesc.
-     */
-    static hashComputeDesc(desc: ComputePipelineDesc): string {
-        const csHash = hashPipelineString(desc.code);
-        const csEp = desc.entryPoint ?? "cs_main";
-        let layoutsKey = "auto";
-        if (desc.layouts && desc.layouts.length > 0) {
-            layoutsKey = "";
-            for (let i = 0; i < desc.layouts.length; i++) {
-                if (i > 0) layoutsKey += ",";
-                layoutsKey += getBindGroupLayoutId(desc.layouts[i]);
-            }
-        }
+	getOrCreateRasterAsync(
+		device: Device | GPUDevice,
+		desc: RasterPipelineDescriptor
+	): Promise<RasterPipeline> {
+		let rawDevice: GPUDevice;
+		let store: DevicePipelineStore;
+		let key: string;
+		try {
+			({ rawDevice, store } = this.#getStore(device));
+			({ key } = normalizeRasterDescriptor(rawDevice, desc));
+		} catch (err) {
+			return Promise.reject(err);
+		}
 
-        return `c:${csHash}:${csEp};l:${layoutsKey}`;
-    }
+		const existing = store.raster.get(key);
+		if (existing !== undefined) {
+			return Promise.resolve(existing);
+		}
 
-    getRaster(key: string): RasterPipeline | undefined {
-        return this._rasterPipelines.get(key);
-    }
+		const inFlight = store.rasterInFlight.get(key);
+		if (inFlight !== undefined) {
+			return inFlight;
+		}
 
-    setRaster(key: string, pipeline: RasterPipeline): void {
-        this._rasterPipelines.set(key, pipeline);
-    }
+		const startGen = this.#generation;
+		const promise = RasterPipeline.createAsync(rawDevice, desc).then(
+			(pipeline) => {
+				store.rasterInFlight.delete(key);
+				if (this.#generation === startGen && this.#stores.get(rawDevice) === store) {
+					store.raster.set(key, pipeline);
+				}
+				return pipeline;
+			},
+			(err) => {
+				store.rasterInFlight.delete(key);
+				throw err;
+			}
+		);
 
-    getCompute(key: string): ComputePipeline | undefined {
-        return this._computePipelines.get(key);
-    }
+		store.rasterInFlight.set(key, promise);
+		return promise;
+	}
 
-    setCompute(key: string, pipeline: ComputePipeline): void {
-        this._computePipelines.set(key, pipeline);
-    }
+	getOrCreateCompute(device: Device | GPUDevice, desc: ComputePipelineDescriptor): ComputePipeline {
+		const { rawDevice, store } = this.#getStore(device);
+		const { key } = normalizeComputeDescriptor(rawDevice, desc);
 
-    /**
-     * Retrieves existing cached RasterPipeline or compiles new instance.
-     */
-    getOrCreateRaster(device: Device | GPUDevice, desc: RasterPipelineDesc): RasterPipeline {
-        const key = PipelineCache.hashRasterDesc(desc);
-        let pipeline = this._rasterPipelines.get(key);
-        if (!pipeline) {
-            pipeline = RasterPipeline.create(device, desc);
-            this._rasterPipelines.set(key, pipeline);
-        }
-        return pipeline;
-    }
+		const existing = store.compute.get(key);
+		if (existing !== undefined) {
+			return existing;
+		}
 
-    /**
-     * Retrieves existing cached RasterPipeline or asynchronously compiles new instance.
-     */
-    async getOrCreateRasterAsync(device: Device | GPUDevice, desc: RasterPipelineDesc): Promise<RasterPipeline> {
-        const key = PipelineCache.hashRasterDesc(desc);
-        let pipeline = this._rasterPipelines.get(key);
-        if (!pipeline) {
-            pipeline = await RasterPipeline.createAsync(device, desc);
-            this._rasterPipelines.set(key, pipeline);
-        }
-        return pipeline;
-    }
+		const pipeline = ComputePipeline.create(rawDevice, desc);
+		store.compute.set(key, pipeline);
+		return pipeline;
+	}
 
-    /**
-     * Retrieves existing cached ComputePipeline or compiles new instance.
-     */
-    getOrCreateCompute(device: Device | GPUDevice, desc: ComputePipelineDesc): ComputePipeline {
-        const key = PipelineCache.hashComputeDesc(desc);
-        let pipeline = this._computePipelines.get(key);
-        if (!pipeline) {
-            pipeline = ComputePipeline.create(device, desc);
-            this._computePipelines.set(key, pipeline);
-        }
-        return pipeline;
-    }
+	getOrCreateComputeAsync(
+		device: Device | GPUDevice,
+		desc: ComputePipelineDescriptor
+	): Promise<ComputePipeline> {
+		let rawDevice: GPUDevice;
+		let store: DevicePipelineStore;
+		let key: string;
+		try {
+			({ rawDevice, store } = this.#getStore(device));
+			({ key } = normalizeComputeDescriptor(rawDevice, desc));
+		} catch (err) {
+			return Promise.reject(err);
+		}
 
-    /**
-     * Retrieves existing cached ComputePipeline or asynchronously compiles new instance.
-     */
-    async getOrCreateComputeAsync(device: Device | GPUDevice, desc: ComputePipelineDesc): Promise<ComputePipeline> {
-        const key = PipelineCache.hashComputeDesc(desc);
-        let pipeline = this._computePipelines.get(key);
-        if (!pipeline) {
-            pipeline = await ComputePipeline.createAsync(device, desc);
-            this._computePipelines.set(key, pipeline);
-        }
-        return pipeline;
-    }
+		const existing = store.compute.get(key);
+		if (existing !== undefined) {
+			return Promise.resolve(existing);
+		}
 
-    clear(): void {
-        this._rasterPipelines.clear();
-        this._computePipelines.clear();
-    }
+		const inFlight = store.computeInFlight.get(key);
+		if (inFlight !== undefined) {
+			return inFlight;
+		}
+
+		const startGen = this.#generation;
+		const promise = ComputePipeline.createAsync(rawDevice, desc).then(
+			(pipeline) => {
+				store.computeInFlight.delete(key);
+				if (this.#generation === startGen && this.#stores.get(rawDevice) === store) {
+					store.compute.set(key, pipeline);
+				}
+				return pipeline;
+			},
+			(err) => {
+				store.computeInFlight.delete(key);
+				throw err;
+			}
+		);
+
+		store.computeInFlight.set(key, promise);
+		return promise;
+	}
+
+	/**
+	 * Clears all cached pipelines and invalidates any in-flight asynchronous compilations
+	 * so they cannot repopulate the cache upon completion. Does not destroy the borrowed GPUDevice.
+	 */
+	clear(): void {
+		this.#generation++;
+		for (const dev of this.#knownDevices) {
+			const store = this.#stores.get(dev);
+			if (store) {
+				store.raster.clear();
+				store.compute.clear();
+			}
+			this.#stores.delete(dev);
+		}
+		this.#knownDevices.clear();
+	}
+
+	/** Alias for `clear()`. */
+	dispose(): void {
+		this.clear();
+	}
+
+	/** Alias for `getOrCreateRaster`. */
+	getRaster(device: Device | GPUDevice, desc: RasterPipelineDescriptor): RasterPipeline {
+		return this.getOrCreateRaster(device, desc);
+	}
+
+	/** Alias for `getOrCreateRasterAsync`. */
+	getRasterAsync(device: Device | GPUDevice, desc: RasterPipelineDescriptor): Promise<RasterPipeline> {
+		return this.getOrCreateRasterAsync(device, desc);
+	}
+
+	/** Alias for `getOrCreateCompute`. */
+	getCompute(device: Device | GPUDevice, desc: ComputePipelineDescriptor): ComputePipeline {
+		return this.getOrCreateCompute(device, desc);
+	}
+
+	/** Alias for `getOrCreateComputeAsync`. */
+	getComputeAsync(device: Device | GPUDevice, desc: ComputePipelineDescriptor): Promise<ComputePipeline> {
+		return this.getOrCreateComputeAsync(device, desc);
+	}
 }

@@ -1,101 +1,92 @@
-import type { Wire } from "./wire.js";
-import type { SocketDirection } from "./socket.js";
-import type { Chip } from "./chip.js";
-
-export type { Wire };
-
-/**
- * Execution context passed to chip.process(inputs, ctx).
- */
-export interface ProcessCtx<TCtx = unknown> {
-    /** User context forwarded through execution */
-    ctx?: TCtx;
+export enum SocketDirection {
+	Input = "input",
+	Output = "output",
 }
 
-/**
- * Configuration for topological runs.
- */
-export interface RunOptions<TCtx = unknown, TChip = unknown> {
-    /** User context forwarded to chip.process(inputs, ctx) */
-    ctx?: TCtx;
-    /** Initial input socket values: { [chipId]: { [socketName]: value } } */
-    overrides?: Record<string, Record<string, any>>;
-    /** Callback invoked before chip execution */
-    onChipEnter?: (chip: TChip, inputs: Record<string, any>) => void;
-    /** Callback invoked after chip execution */
-    onChipLeave?: (chip: TChip, outputs: Record<string, any>) => void;
-    /** Callback invoked on wire value resolution */
-    onWireTransmit?: (wire: Wire, value: any) => void;
+export type SocketType = string;
+
+export const WILDCARD_TYPE: SocketType = "*";
+
+export type Metadata = Record<string, unknown>;
+
+export type ChipProcessor<
+	TIn extends Record<string, unknown> = Record<string, unknown>,
+	TOut extends Record<string, unknown> = Record<string, unknown>
+> = (inputs: Readonly<TIn>, outputs: TOut) => void;
+
+export type CircuitErrorPolicy = "skip-dependents" | "fail-fast";
+
+export interface CircuitProcessorError {
+	readonly chipId: string;
+	readonly error: unknown;
 }
 
-/**
- * Result of a circuit execution run.
- */
-export interface RunResult<TChip = unknown> {
-    /** Mapping of chip ID to computed output socket records */
-    outputs: Map<string, Record<string, any>>;
-    /** Chips executed in topological order */
-    executedChips: TChip[];
-    /** Caught execution errors */
-    errors: Array<{ chipId: string; error: unknown }>;
+export interface CircuitRunResult {
+	readonly completed: boolean;
+	readonly executedChipIds: readonly string[];
+	readonly skippedChipIds: readonly string[];
+	readonly errors: readonly CircuitProcessorError[];
 }
 
-/**
- * Classification of structural graph validation issue.
- */
-export type CircuitIssueType = "cycle" | "missing_input" | "type_mismatch" | "isolated_chip";
-
-/**
- * Diagnostic descriptor representing a validation defect.
- */
-export interface CircuitIssue {
-    type: CircuitIssueType;
-    message: string;
-    chipId?: string;
-    socketName?: string;
-    wire?: Wire;
+export interface CircuitRunOptions {
+	/**
+	 * Policy when a chip's processor throws an exception:
+	 * - "skip-dependents" (default): records the error, skips downstream dependent chips,
+	 *   and continues executing independent branches.
+	 * - "fail-fast": rethrows the processor exception immediately.
+	 */
+	errorPolicy?: CircuitErrorPolicy;
+	/**
+	 * Optional hook invoked before a chip's processor executes.
+	 * Exceptions thrown by instrumentation hooks propagate directly to the caller of run().
+	 */
+	onChipEnter?: (chip: any, inputs: Record<string, unknown>) => void;
+	/**
+	 * Optional hook invoked after a chip's processor succeeds.
+	 * Exceptions thrown by instrumentation hooks propagate directly to the caller of run().
+	 */
+	onChipLeave?: (chip: any, outputs: Record<string, unknown>) => void;
+	/**
+	 * Optional hook invoked when a wire transmits a value from producer to consumer.
+	 * Exceptions thrown by instrumentation hooks propagate directly to the caller of run().
+	 */
+	onWireTransmit?: (wire: any, value: unknown) => void;
+	/**
+	 * Optional callback invoked when a processor throws under the "skip-dependents" policy.
+	 */
+	onError?: (chip: any, error: unknown) => void;
 }
 
-/**
- * Result of static circuit validation pass.
- */
-export interface CircuitValidationResult {
-    valid: boolean;
-    issues: CircuitIssue[];
-}
-
-/**
- * Serialized representation of a socket endpoint.
- */
 export interface SerializedSocket {
-    name: string;
-    direction: SocketDirection;
-    dataType?: string;
-    required?: boolean;
+	name: string;
+	type: SocketType;
+	direction: SocketDirection;
+	defaultValue?: unknown;
+	metadata: Metadata;
 }
 
-/**
- * Serialized representation of a circuit chip.
- */
 export interface SerializedChip {
-    id: string;
-    name: string;
-    type?: string;
-    inputs: SerializedSocket[];
-    outputs: SerializedSocket[];
-    metadata?: Record<string, any>;
+	id: string;
+	label: string;
+	inputs: SerializedSocket[];
+	outputs: SerializedSocket[];
+	metadata: Metadata;
+}
+
+export interface SerializedWire {
+	fromChipId: string;
+	fromSocketName: string;
+	toChipId: string;
+	toSocketName: string;
+	metadata: Metadata;
 }
 
 /**
- * Serialized representation of an entire circuit topology.
+ * Topology-only serialization format for a Circuit.
+ * Note: processor functions and closures are runtime code and are not included in topology JSON.
  */
 export interface SerializedCircuit {
-    label: string;
-    chips: SerializedChip[];
-    wires: Wire[];
+	chips: SerializedChip[];
+	wires: SerializedWire[];
+	metadata: Metadata;
 }
-
-/**
- * Factory callback instantiating a Chip from serialized data.
- */
-export type ChipFactory = (serialized: SerializedChip) => Chip;

@@ -6,8 +6,14 @@
 		"WeebGfx"
 	],
 	"scripts": {
-		"build": "cd Atoolkit && npm run build",
+		"build": "npm run build:atoolkit",
+		"build:atoolkit": "npm --prefix Atoolkit run build",
 		"typecheck": "tsc --noEmit",
+		"typecheck:atoolkit": "tsc -p Atoolkit/tsconfig.json --noEmit && tsc -p tests/atoolkit/tsconfig.json --noEmit",
+		"test:atoolkit": "node --experimental-transform-types --import ./tests/atoolkit/register-ts.mjs --test tests/atoolkit/alm.test.ts tests/atoolkit/aecs.test.ts tests/atoolkit/atempo.test.ts tests/atoolkit/acircuit.test.ts tests/atoolkit/adiag.test.ts tests/atoolkit/awgpu.test.ts tests/atoolkit/awgpu-graph.test.ts tests/atoolkit/awasm.test.ts",
+		"test:atoolkit:gpu:browser": "tsc -p tests/atoolkit/gpu/tsconfig.browser.json && node tests/atoolkit/gpu/run-browser.mjs",
+		"test:atoolkit:gpu": "node --experimental-transform-types --import ./tests/atoolkit/register-ts.mjs tests/atoolkit/gpu/run-gpu-tests.ts",
+		"test:atoolkit:package": "npm run build:atoolkit && node --experimental-transform-types --import ./tests/atoolkit/register-ts.mjs tests/atoolkit/package/verify-package.ts",
 		"yalc:publish": "cd Atoolkit && npx yalc publish && cd ../WeebGfx && npx yalc publish",
 		"yalc:push": "cd Atoolkit && npx yalc push && cd ../WeebGfx && npx yalc push"
 	},

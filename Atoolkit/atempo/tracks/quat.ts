@@ -1,88 +1,72 @@
-import { Track } from "../track.js";
-import { type Curve } from "../curve.js";
+import { Quat } from "../../alm/quat.js";
+import { Vec3 } from "../../alm/vec3.js";
+import { Track, type TrackOptions } from "../track.js";
+import type { Curve } from "../curve.js";
+
+const _normScratch0 = new Quat();
+const _normScratch1 = new Quat();
+const _axisScratch = new Vec3();
 
 /**
- * 4D Quaternion rotation track.
- * Evaluates spherical linear interpolation (SLERP) with antipodal sign check and renormalization.
+ * 4D unit quaternion keyframe track `[x, y, z, w]`.
+ *
+ * Normalizes input keyframes on insertion and interpolates via shortest-arc
+ * spherical linear interpolation (`Quat.slerp`).
  */
 export class QuatTrack extends Track<ArrayLike<number>, Float32Array> {
-    constructor(initialCapacity = 16) {
-        super(initialCapacity);
-    }
+	constructor(options?: TrackOptions | number) {
+		super(options);
+	}
 
-    blend(a: ArrayLike<number>, b: ArrayLike<number>, alpha: number, out?: Float32Array): Float32Array {
-        out ??= new Float32Array(4);
-
-        const ax = a[0], ay = a[1], az = a[2], aw = a[3];
-        let bx = b[0], by = b[1], bz = b[2], bw = b[3];
-
-        let dot = ax * bx + ay * by + az * bz + aw * bw;
-        if (dot < 0) {
-            dot = -dot;
-            bx = -bx;
-            by = -by;
-            bz = -bz;
-            bw = -bw;
-        }
-
-        let scale0: number;
-        let scale1: number;
-
-        if (dot > 0.9995) {
-            scale0 = 1.0 - alpha;
-            scale1 = alpha;
-        } else {
-            const theta = Math.acos(Math.max(-1, Math.min(1, dot)));
-            const sinTheta = Math.sin(theta);
-            scale0 = Math.sin((1.0 - alpha) * theta) / sinTheta;
-            scale1 = Math.sin(alpha * theta) / sinTheta;
-        }
-
-        const ox = scale0 * ax + scale1 * bx;
-        const oy = scale0 * ay + scale1 * by;
-        const oz = scale0 * az + scale1 * bz;
-        const ow = scale0 * aw + scale1 * bw;
-
-        const lenSq = ox * ox + oy * oy + oz * oz + ow * ow;
-        if (lenSq > 1e-12) {
-            const invLen = 1.0 / Math.sqrt(lenSq);
-            out[0] = ox * invLen;
-            out[1] = oy * invLen;
-            out[2] = oz * invLen;
-            out[3] = ow * invLen;
-        } else {
-            out[0] = 0;
-            out[1] = 0;
-            out[2] = 0;
-            out[3] = 1;
-        }
-
-        return out;
-    }
-
-    protected defaultValue(out?: Float32Array): Float32Array {
-        out ??= new Float32Array(4);
-        out[0] = 0;
-        out[1] = 0;
-        out[2] = 0;
-        out[3] = 1;
-        return out;
-    }
+	protected override cloneInput(source: ArrayLike<number>): Float32Array {
+		Quat.normalize(source, _normScratch0);
+		return new Float32Array([
+			_normScratch0[0],
+			_normScratch0[1],
+			_normScratch0[2],
+			_normScratch0[3],
+		]);
+	}
 
 	/**
-	 * Appends keyframe converted from axis and angle in radians.
+	 * Converts an axis-angle rotation into a unit quaternion and inserts a keyframe at `time`.
 	 */
-	addAxisAngleKey(
+	addAxisAngleKey<TData = any>(
 		time: number,
 		axis: ArrayLike<number>,
 		rad: number,
-		curve?: Curve<any>,
-		curveData?: any,
+		curve?: Curve<TData>,
+		curveData?: TData,
 		fps?: number
 	): this {
-		const half = rad * 0.5;
-		const s = Math.sin(half);
-		const q = [axis[0] * s, axis[1] * s, axis[2] * s, Math.cos(half)];
-		return this.addKey(time, q, curve, curveData, fps);
+		Vec3.normalize(axis, _axisScratch);
+		Quat.fromAxisAngle(_axisScratch, rad, _normScratch0);
+		return this.addKey(time, _normScratch0, curve, curveData, fps);
+	}
+
+	override blend(
+		v0: ArrayLike<number>,
+		v1: ArrayLike<number>,
+		alpha: number,
+		out?: Float32Array
+	): Float32Array {
+		const target = out ?? new Float32Array([0, 0, 0, 1]);
+		Quat.normalize(v0, _normScratch0);
+		Quat.normalize(v1, _normScratch1);
+		Quat.slerp(_normScratch0, _normScratch1, alpha, _normScratch0);
+		target[0] = _normScratch0[0];
+		target[1] = _normScratch0[1];
+		target[2] = _normScratch0[2];
+		target[3] = _normScratch0[3];
+		return target;
+	}
+
+	protected override defaultValue(out?: Float32Array): Float32Array {
+		const target = out ?? new Float32Array(4);
+		target[0] = 0;
+		target[1] = 0;
+		target[2] = 0;
+		target[3] = 1;
+		return target;
 	}
 }

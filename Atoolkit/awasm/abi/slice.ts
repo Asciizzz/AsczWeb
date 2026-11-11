@@ -5,76 +5,92 @@
 import { WasmMemory } from "../memory/wasm-memory.js";
 
 /**
- * Value object encapsulating a span of WebAssembly linear memory (pointer + length).
- * Exposes zero-copy typed sub-array views and transfer methods over active linear memory buffers.
+ * Value object encapsulating a byte span `(ptr, length)` in guest `WasmMemory`.
+ *
+ * View lifetime contract:
+ * - `readUint8`, `readFloat32`, and `readUint32` validate bounds against the current `memory.byteLength`
+ *   and return a borrowed typed array view over `memory.buffer`.
+ * - As with `MemoryView`, returned typed array views are invalidated if the underlying `WasmMemory`
+ *   subsequently grows.
  */
 export class Slice {
-    public readonly ptr: number;
-    public readonly length: number;
+	readonly ptr: number;
+	readonly length: number;
 
-    constructor(ptr: number, length: number) {
-        if (ptr < 0) {
-            throw new Error(`Pointer must be non-negative, received ${ptr}`);
-        }
-        if (length < 0) {
-            throw new Error(`Length must be non-negative, received ${length}`);
-        }
-        this.ptr = ptr;
-        this.length = length;
-    }
+	constructor(ptr: number, length: number) {
+		if (!Number.isSafeInteger(ptr) || ptr < 0) {
+			throw new RangeError(`Slice: ptr must be a non-negative integer, received ${ptr}.`);
+		}
+		if (!Number.isSafeInteger(length) || length < 0) {
+			throw new RangeError(`Slice: length must be a non-negative integer, received ${length}.`);
+		}
+		this.ptr = ptr;
+		this.length = length;
+	}
 
-    /**
-     * Slices an 8-bit unsigned integer view across the memory span.
-     */
-    public readUint8(memory: WasmMemory): Uint8Array {
-        this.assertBounds(memory);
-        return new Uint8Array(memory.buffer, this.ptr, this.length);
-    }
+	/**
+	 * Creates a borrowed `Uint8Array` view across `[ptr, ptr + length)`.
+	 */
+	readUint8(memory: WasmMemory): Uint8Array {
+		this.#assertBounds(memory);
+		return new Uint8Array(memory.buffer, this.ptr, this.length);
+	}
 
-    /**
-     * Slices a 32-bit floating point view across the memory span. Requires 4-byte pointer alignment.
-     */
-    public readFloat32(memory: WasmMemory): Float32Array {
-        this.assertBounds(memory);
-        if ((this.ptr & 3) !== 0) {
-            throw new Error(`Slice pointer ${this.ptr} is not 4-byte aligned for Float32`);
-        }
-        const elementCount = Math.floor(this.length / 4);
-        return new Float32Array(memory.buffer, this.ptr, elementCount);
-    }
+	/**
+	 * Creates a borrowed `Float32Array` view across `[ptr, ptr + length)`.
+	 * Requires both `ptr` and `length` to be multiples of 4 bytes.
+	 */
+	readFloat32(memory: WasmMemory): Float32Array {
+		this.#assertBounds(memory);
+		if (this.ptr % 4 !== 0) {
+			throw new RangeError(`Slice.readFloat32: ptr (${this.ptr}) is not 4-byte aligned.`);
+		}
+		if (this.length % 4 !== 0) {
+			throw new RangeError(
+				`Slice.readFloat32: byte length (${this.length}) is not a multiple of 4.`
+			);
+		}
+		return new Float32Array(memory.buffer, this.ptr, this.length / 4);
+	}
 
-    /**
-     * Slices a 32-bit unsigned integer view across the memory span. Requires 4-byte pointer alignment.
-     */
-    public readUint32(memory: WasmMemory): Uint32Array {
-        this.assertBounds(memory);
-        if ((this.ptr & 3) !== 0) {
-            throw new Error(`Slice pointer ${this.ptr} is not 4-byte aligned for Uint32`);
-        }
-        const elementCount = Math.floor(this.length / 4);
-        return new Uint32Array(memory.buffer, this.ptr, elementCount);
-    }
+	/**
+	 * Creates a borrowed `Uint32Array` view across `[ptr, ptr + length)`.
+	 * Requires both `ptr` and `length` to be multiples of 4 bytes.
+	 */
+	readUint32(memory: WasmMemory): Uint32Array {
+		this.#assertBounds(memory);
+		if (this.ptr % 4 !== 0) {
+			throw new RangeError(`Slice.readUint32: ptr (${this.ptr}) is not 4-byte aligned.`);
+		}
+		if (this.length % 4 !== 0) {
+			throw new RangeError(
+				`Slice.readUint32: byte length (${this.length}) is not a multiple of 4.`
+			);
+		}
+		return new Uint32Array(memory.buffer, this.ptr, this.length / 4);
+	}
 
-    /**
-     * Copies external typed array bytes directly into the guest linear memory span.
-     */
-    public copyFrom(source: ArrayBufferView, memory: WasmMemory): void {
-        this.assertBounds(memory);
-        const sourceBytes = new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
-        if (sourceBytes.byteLength > this.length) {
-            throw new Error(
-                `Source byte length ${sourceBytes.byteLength} exceeds slice capacity of ${this.length} bytes`
-            );
-        }
-        const targetBytes = new Uint8Array(memory.buffer, this.ptr, sourceBytes.byteLength);
-        targetBytes.set(sourceBytes);
-    }
+	/**
+	 * Copies `source` bytes into guest linear memory starting at `ptr`.
+	 */
+	copyFrom(source: ArrayBufferView, memory: WasmMemory): void {
+		this.#assertBounds(memory);
+		const sourceBytes = new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+		if (sourceBytes.byteLength > this.length) {
+			throw new RangeError(
+				`Slice.copyFrom: source byteLength (${sourceBytes.byteLength}) exceeds slice capacity (${this.length} bytes).`
+			);
+		}
+		const targetBytes = new Uint8Array(memory.buffer, this.ptr, sourceBytes.byteLength);
+		targetBytes.set(sourceBytes);
+	}
 
-    private assertBounds(memory: WasmMemory): void {
-        if (this.ptr + this.length > memory.byteLength) {
-            throw new Error(
-                `Slice span [${this.ptr}, ${this.ptr + this.length}) exceeds memory byte length ${memory.byteLength}`
-            );
-        }
-    }
+	#assertBounds(memory: WasmMemory): void {
+		const memByteLength = memory.byteLength;
+		if (this.ptr + this.length > memByteLength) {
+			throw new RangeError(
+				`Slice: span [${this.ptr}, ${this.ptr + this.length}) exceeds memory byteLength (${memByteLength}).`
+			);
+		}
+	}
 }

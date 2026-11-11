@@ -1,6 +1,8 @@
 # Awasm
 
-Domain-agnostic WebAssembly computational engine managing linear memory allocation, bump arenas, intrusive slab pools, detachment-resilient typed views, binary introspection, declarative struct layouts, streaming compilation, host import tables, and lock-free multi-worker synchronization.
+Domain-agnostic WebAssembly computational engine managing linear memory allocation, bump arenas, bitmap-guarded slab pools, detachment-resilient typed views, binary introspection, declarative struct layouts, streaming compilation, host import tables, and lock-free SPSC synchronization.
+
+> **Experimental Status**: The runtime lifecycle (`ModuleLoader`, `HostBridge`, `WasmInstance`) and threading/concurrency (`SharedMemory`, `AtomicQueue`, `WorkerPool`) subsystems are marked **experimental**.
 
 Built on progressive disclosure of runtime control, zero-allocation hot paths, and strict compositional modularity across orthogonal functional subsystems.
 
@@ -184,8 +186,8 @@ export class WasmMemory {
 #### `constructor(descriptor: MemoryDescriptor)`
 Instantiates native `WebAssembly.Memory` with initial and optional maximum page constraints. Sets generation counter to 0.
 
-#### `static fromNative(memory: WebAssembly.Memory, initialPages = 1): WasmMemory`
-Adopts existing native `WebAssembly.Memory` handle. Detects whether backing buffer is `SharedArrayBuffer`.
+#### `static fromNative(memory: WebAssembly.Memory, expectedPages?: number): WasmMemory`
+Adopts an existing native `WebAssembly.Memory` handle, deriving the actual page count from `memory.buffer.byteLength >>> 16` (and throwing `RangeError` if `expectedPages` is provided and does not match). Detects whether the backing buffer is a `SharedArrayBuffer` and automatically reconciles native or guest-initiated `memory.grow` operations.
 
 #### `grow(deltaPages: number): number`
 Invokes native `memory.grow()`, increments generation counter, notifies registered resize listeners, and returns previous page count.
@@ -223,10 +225,10 @@ export class LinearArena {
 Binds arena to byte region within specified `WasmMemory` instance. Defaults capacity to available space from `baseOffset` to end of memory.
 
 #### `allocate(byteSize: number, alignment = 8): number`
-Advances internal offset pointer to next aligned boundary. Returns byte pointer.
-- `alignment`: Must be a power of two (1, 2, 4, 8, 16). Defaults to 8 bytes.
-- Automatically expands underlying memory if allocation exceeds capacity and maximum page bounds permit.
-- Throws error if allocation exceeds hard capacity.
+Advances internal offset pointer to next aligned boundary within the arena's fixed `[baseOffset, baseOffset + byteCapacity)` window and returns the byte pointer.
+- `alignment`: Must be a power of two. Defaults to 8 bytes.
+- Never calls `memory.grow()` implicitly and never advances `currentOffset` when an allocation fails.
+- Throws `RangeError` if allocation exceeds the arena's configured capacity (`tryAllocate(byteSize, alignment)` returns `null` instead of throwing).
 
 #### `mark(): number`
 Returns current allocation watermark pointer.
@@ -596,24 +598,28 @@ Performs atomic 32-bit integer write.
 
 ### 5.2 AtomicQueue
 
-Lock-free circular ring buffer residing in shared linear memory for inter-thread task dispatch.
+Lock-free single-producer / single-consumer (SPSC) circular ring buffer residing in shared linear memory using unsigned 32-bit monotonic indices (`>>> 0`).
 
 ```typescript
 export class AtomicQueue {
-    constructor(buffer: SharedArrayBuffer, byteOffset: number, capacityPowerOfTwo?: number);
+	constructor(buffer: SharedArrayBuffer, byteOffset: number, capacityPowerOfTwo?: number, reset?: boolean);
+	static initialize(buffer: SharedArrayBuffer, byteOffset: number, capacityPowerOfTwo?: number): AtomicQueue;
+	static attach(buffer: SharedArrayBuffer, byteOffset: number, capacityPowerOfTwo?: number): AtomicQueue;
 
-    enqueue(value: number): boolean;
-    dequeue(): number | null;
+	enqueue(value: number): boolean;
+	dequeue(): number | null;
 
-    get length(): number;
-    get capacity(): number;
-    static requiredBytes(capacityPowerOfTwo: number): number;
+	get length(): number;
+	get capacity(): number;
+	static requiredBytes(capacityPowerOfTwo: number): number;
 }
 ```
 
-#### `constructor(buffer: SharedArrayBuffer, byteOffset: number, capacityPowerOfTwo = 256)`
-Initializes atomic ring buffer over shared memory span.
-- `capacityPowerOfTwo`: Capacity must be a power of two for mask-based wrapping.
+#### `static initialize(buffer: SharedArrayBuffer, byteOffset: number, capacityPowerOfTwo = 256): AtomicQueue`
+Zero-initializes the head, tail, and ring slots in shared memory and returns the producer/consumer queue view.
+
+#### `static attach(buffer: SharedArrayBuffer, byteOffset: number, capacityPowerOfTwo = 256): AtomicQueue`
+Attaches to an already-initialized SPSC ring buffer in shared memory without resetting existing head/tail indices or queued items.
 
 #### `enqueue(value: number): boolean`
 Appends 32-bit integer. Returns `false` when ring buffer is full.
@@ -730,17 +736,20 @@ Links host functions into guest module imports, compiles binary, and executes ty
 ```typescript
 import { ModuleLoader, HostBridge, WasmInstance } from "@asciiz/atoolkit/awasm";
 
+declare const wasmBytecode: Uint8Array;
+
 const bridge = new HostBridge()
-    .registerDefaultEnv({
-        nowProvider: () => performance.now(),
-        onLog: (msg) => console.log(`[Guest]: ${msg}`),
-    })
-    .register("math", "cos", (val: number) => Math.cos(val));
+	.registerDefaultEnv({
+		nowProvider: () => performance.now(),
+		onLog: (msg) => console.log(`[Guest]: ${msg}`),
+	})
+	.register("math", "cos", (val: number) => Math.cos(val));
 
 const module = await ModuleLoader.compile(wasmBytecode);
 const instance = await WasmInstance.instantiate(module, bridge.build());
 
 const result = instance.call<number>("compute", 100);
+void result;
 ```
 
 ### 6.4 Shared Memory & Atomic Task Queue

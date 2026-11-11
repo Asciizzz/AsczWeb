@@ -7,11 +7,11 @@ import * as Atempo from "./atempo/index.js";
 import * as Awasm from "./awasm/index.js";
 
 export {
-    Acircuit,
-    Alm,
-    Aecs,
-    Adiag,
-    Awgpu,
-    Atempo,
-    Awasm,
+	Acircuit,
+	Alm,
+	Aecs,
+	Adiag,
+	Awgpu,
+	Atempo,
+	Awasm,
 };

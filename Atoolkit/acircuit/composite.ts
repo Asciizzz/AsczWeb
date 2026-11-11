@@ -1,124 +1,142 @@
+import type { Metadata } from "./types.js";
 import { Chip } from "./chip.js";
 import type { Circuit } from "./circuit.js";
-import type { ProcessCtx } from "./types.js";
 
-export interface InputSocketMapping {
-    outerSocket: string;
-    innerChipId: string;
-    innerSocket: string;
+/**
+ * Proxy Chip wrapping an inner Chip under a prefixed ID (`${prefix}/${original.id}`).
+ *
+ * Note: ChipProxy copies socket definitions so it can be independently wired into a flattened
+ * destination Circuit, while delegating its `process` execution to `original.process` (and
+ * therefore sharing any closure state captured by `original.process`).
+ */
+export class ChipProxy extends Chip {
+	readonly original: Chip;
+
+	constructor(prefix: string, original: Chip) {
+		super(
+			`${prefix}/${original.id}`,
+			`${prefix}/${original.label}`,
+			(inputs, outputs) => original.process(inputs, outputs),
+			{ ...original.metadata }
+		);
+		this.original = original;
+
+		for (const s of original._inputSockets()) {
+			this.addInput(s.name, s.type, s.defaultValue, s.metadata);
+		}
+		for (const s of original._outputSockets()) {
+			this.addOutput(s.name, s.type, s.defaultValue, s.metadata);
+		}
+	}
 }
 
-export interface OutputSocketMapping {
-    outerSocket: string;
-    innerChipId: string;
-    innerSocket: string;
+export interface ExposedPortMap {
+	readonly innerChipId: string;
+	readonly innerSocketName: string;
 }
 
 /**
- * Composite chip encapsulating an inner Circuit graph.
+ * Subgraph container that exposes selected inner sockets as external ports and can flatten
+ * its internal topology into a parent Circuit using prefixed ChipProxy instances.
  */
-export class Subcircuit extends Chip {
-    readonly innerCircuit: Circuit;
-    readonly inputMappings = new Map<string, InputSocketMapping>();
-    readonly outputMappings = new Map<string, OutputSocketMapping>();
+export class CompositeChip extends Chip {
+	readonly subcircuit: Circuit;
+	readonly exposedInputs = new Map<string, ExposedPortMap>();
+	readonly exposedOutputs = new Map<string, ExposedPortMap>();
 
-    constructor(id: string, name: string, innerCircuit: Circuit) {
-        super(id, name);
-        this.innerCircuit = innerCircuit;
-    }
+	constructor(id: string, subcircuit: Circuit, label = id, metadata: Metadata = {}) {
+		super(id, label, undefined, metadata);
+		this.subcircuit = subcircuit;
+	}
 
-    /**
-     * Maps an external input socket to an internal chip's input socket.
-     */
-    mapInput(
-        outerSocketName: string,
-        innerChipId: string,
-        innerSocketName: string,
-        dataType?: string
-    ): this {
-        const innerChip = this.innerCircuit.getChip(innerChipId);
-        if (!innerChip) {
-            throw new Error(`[Subcircuit] Inner chip "${innerChipId}" not found in subcircuit.`);
-        }
-        const innerSocket = innerChip.getInput(innerSocketName);
-        if (!innerSocket) {
-            throw new Error(`[Subcircuit] Inner input socket "${innerChipId}:${innerSocketName}" not found.`);
-        }
-        const effectiveType = dataType ?? innerSocket.dataType;
-        this.addInput(outerSocketName, effectiveType);
-        this.inputMappings.set(outerSocketName, {
-            outerSocket: outerSocketName,
-            innerChipId,
-            innerSocket: innerSocketName,
-        });
-        return this;
-    }
+	/** Exposes an input socket of an inner chip in subcircuit as an input socket on this CompositeChip. */
+	exposeInput(
+		externalName: string,
+		innerChipId: string,
+		innerSocketName: string
+	): this {
+		const innerChip = this.subcircuit.getChip(innerChipId);
+		if (!innerChip) {
+			throw new Error(`Inner chip '${innerChipId}' not found in subcircuit.`);
+		}
+		const socket = innerChip.getInput(innerSocketName);
+		if (!socket) {
+			throw new Error(`Input socket '${innerSocketName}' not found on inner chip '${innerChipId}'.`);
+		}
 
-    /**
-     * Maps an internal chip's output socket to an external output socket.
-     */
-    mapOutput(
-        outerSocketName: string,
-        innerChipId: string,
-        innerSocketName: string,
-        dataType?: string
-    ): this {
-        const innerChip = this.innerCircuit.getChip(innerChipId);
-        if (!innerChip) {
-            throw new Error(`[Subcircuit] Inner chip "${innerChipId}" not found in subcircuit.`);
-        }
-        const innerSocket = innerChip.getOutput(innerSocketName);
-        if (!innerSocket) {
-            throw new Error(`[Subcircuit] Inner output socket "${innerChipId}:${innerSocketName}" not found.`);
-        }
-        const effectiveType = dataType ?? innerSocket.dataType;
-        this.addOutput(outerSocketName, effectiveType);
-        this.outputMappings.set(outerSocketName, {
-            outerSocket: outerSocketName,
-            innerChipId,
-            innerSocket: innerSocketName,
-        });
-        return this;
-    }
+		this.addInput(externalName, socket.type, socket.defaultValue, socket.metadata);
+		this.exposedInputs.set(externalName, { innerChipId, innerSocketName });
+		return this;
+	}
 
-    override process(
-        inputs: Record<string, any>,
-        ctx?: ProcessCtx<any>
-    ): Record<string, any> {
-        const overrides: Record<string, Record<string, any>> = {};
+	/** Exposes an output socket of an inner chip in subcircuit as an output socket on this CompositeChip. */
+	exposeOutput(
+		externalName: string,
+		innerChipId: string,
+		innerSocketName: string
+	): this {
+		const innerChip = this.subcircuit.getChip(innerChipId);
+		if (!innerChip) {
+			throw new Error(`Inner chip '${innerChipId}' not found in subcircuit.`);
+		}
+		const socket = innerChip.getOutput(innerSocketName);
+		if (!socket) {
+			throw new Error(`Output socket '${innerSocketName}' not found on inner chip '${innerChipId}'.`);
+		}
 
-        for (const [outerName, mapping] of this.inputMappings) {
-            const val = inputs[outerName];
-            if (val !== undefined) {
-                let chipOverrides = overrides[mapping.innerChipId];
-                if (!chipOverrides) {
-                    chipOverrides = {};
-                    overrides[mapping.innerChipId] = chipOverrides;
-                }
-                chipOverrides[mapping.innerSocket] = val;
-            }
-        }
+		this.addOutput(externalName, socket.type, socket.defaultValue, socket.metadata);
+		this.exposedOutputs.set(externalName, { innerChipId, innerSocketName });
+		return this;
+	}
 
-        const runResult = this.innerCircuit.run({
-            overrides,
-            ctx: ctx?.ctx,
-        });
+	/**
+	 * Transactionally flattens this composite chip's subcircuit into targetCircuit using
+	 * prefixed ChipProxy instances (`${this.id}/${innerChip.id}`).
+	 * Preflights all proxy IDs and internal wires before modifying targetCircuit.
+	 */
+	flattenInto(targetCircuit: Circuit): Map<string, ChipProxy> {
+		const innerChips = this.subcircuit.chips;
+		const innerWires = this.subcircuit.wires;
 
-        if (runResult.errors.length > 0) {
-            const first = runResult.errors[0];
-            throw first.error instanceof Error
-                ? first.error
-                : new Error(`[Subcircuit] Inner execution failed on chip "${first.chipId}": ${String(first.error)}`);
-        }
+		for (const innerChip of innerChips.values()) {
+			const proxyId = `${this.id}/${innerChip.id}`;
+			if (targetCircuit.hasChip(proxyId)) {
+				throw new Error(
+					`CompositeChip.flattenInto: proxy chip ID '${proxyId}' already exists in targetCircuit.`
+				);
+			}
+		}
 
-        const outputs: Record<string, any> = {};
-        for (const [outerName, mapping] of this.outputMappings) {
-            const chipOuts = runResult.outputs.get(mapping.innerChipId);
-            if (chipOuts && chipOuts[mapping.innerSocket] !== undefined) {
-                outputs[outerName] = chipOuts[mapping.innerSocket];
-            }
-        }
+		for (let i = 0; i < innerWires.length; i++) {
+			const w = innerWires[i];
+			const fromInner = innerChips.get(w.fromChipId);
+			const toInner = innerChips.get(w.toChipId);
+			if (!fromInner || !toInner) {
+				throw new Error(
+					`CompositeChip.flattenInto: internal wire ${w.fromChipId}.${w.fromSocketName} -> ${w.toChipId}.${w.toSocketName} references a missing inner chip.`
+				);
+			}
+			if (!fromInner.hasOutput(w.fromSocketName) || !toInner.hasInput(w.toSocketName)) {
+				throw new Error(
+					`CompositeChip.flattenInto: internal wire ${w.fromChipId}.${w.fromSocketName} -> ${w.toChipId}.${w.toSocketName} references a missing socket.`
+				);
+			}
+		}
 
-        return outputs;
-    }
+		const proxyMap = new Map<string, ChipProxy>();
+		for (const innerChip of innerChips.values()) {
+			const proxy = new ChipProxy(this.id, innerChip);
+			proxyMap.set(innerChip.id, proxy);
+			targetCircuit.addChip(proxy);
+		}
+
+		for (let i = 0; i < innerWires.length; i++) {
+			const w = innerWires[i];
+			const outProxy = proxyMap.get(w.fromChipId)!;
+			const inProxy = proxyMap.get(w.toChipId)!;
+			targetCircuit.connect(outProxy, w.fromSocketName, inProxy, w.toSocketName, w.metadata);
+		}
+
+		return proxyMap;
+	}
 }

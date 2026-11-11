@@ -1,88 +1,132 @@
+const _springScratch: [number, number] = [0, 0];
+
 /**
- * Analytical solution for damped harmonic oscillator dynamics across under-damped, critically damped, and over-damped regimes.
+ * Analytic second-order harmonic oscillator (spring-damper) solver.
+ *
+ * Evaluates closed-form differential equation solutions across under-damped (`zeta < 1`),
+ * critically-damped (`zeta == 1`), and over-damped (`zeta > 1`) regimes.
  */
-
 export class Spring {
-    frequency: number; // Natural frequency in Hz
-    damping: number;   // Damping ratio (zeta): 1.0 = critical, <1.0 = under-damped, >1.0 = over-damped
+	/** Angular frequency in radians per second (`omega >= 0`). */
+	frequency: number;
+	/** Damping ratio (`zeta >= 0`: `< 1` under-damped, `1` critically-damped, `> 1` over-damped). */
+	damping: number;
 
-    constructor(frequency = 2.0, damping = 0.7) {
-        this.frequency = Math.max(0.001, frequency);
-        this.damping = Math.max(0.0, damping);
-    }
+	constructor(frequency = 4.0 * Math.PI, damping = 1.0) {
+		if (!Number.isFinite(frequency) || frequency < 0) {
+			throw new RangeError(`Spring: frequency must be a finite non-negative number, got ${frequency}.`);
+		}
+		if (!Number.isFinite(damping) || damping < 0) {
+			throw new RangeError(`Spring: damping must be a finite non-negative number, got ${damping}.`);
+		}
+		this.frequency = frequency;
+		this.damping = damping;
+	}
 
-    /**
-     * Updates scalar spring position and velocity in-place.
-     * posVel[0] = position, posVel[1] = velocity.
-     */
-    update(posVel: Float32Array | number[], target: number, deltaSec: number): void {
-        const dt = Math.max(0, deltaSec);
-        if (dt === 0) return;
+	/**
+	 * Advances a 2-element `[position, velocity]` state tuple or `Float32Array` in-place by `dt` seconds.
+	 */
+	update(
+		posVel: [number, number] | Float32Array,
+		target: number,
+		dt: number
+	): [number, number] | Float32Array {
+		return this.updateScalar(posVel[0], posVel[1], target, dt, posVel);
+	}
 
-        const f = this.frequency;
-        const z = this.damping;
+	/**
+	 * Advances a 1D scalar spring state by `dt` seconds and writes `[newPosition, newVelocity]` into `out`.
+	 * When `dt` is 0 or `frequency` is 0, preserves `[position, velocity]`.
+	 * Throws a `RangeError` if `dt` is negative or non-finite.
+	 */
+	updateScalar(
+		position: number,
+		velocity: number,
+		target: number,
+		dt: number,
+		out: [number, number] | Float32Array = [0, 0]
+	): [number, number] | Float32Array {
+		if (!Number.isFinite(dt) || dt < 0) {
+			throw new RangeError(`Spring.updateScalar: dt must be a finite non-negative number, got ${dt}.`);
+		}
+		const omega = this.frequency;
+		const zeta = this.damping;
 
-        const w = f * (2.0 * Math.PI);
-        const x = posVel[0] - target;
-        const v = posVel[1];
+		if (!Number.isFinite(omega) || omega < 0 || !Number.isFinite(zeta) || zeta < 0) {
+			throw new RangeError("Spring parameters (frequency, damping) must be finite non-negative numbers.");
+		}
 
-        if (z < 0.9999) {
-            // Under-damped oscillation
-            const wd = w * Math.sqrt(1.0 - z * z);
-            const exp = Math.exp(-z * w * dt);
-            const c = Math.cos(wd * dt);
-            const s = Math.sin(wd * dt);
+		if (dt === 0.0 || omega === 0.0) {
+			out[0] = position;
+			out[1] = velocity;
+			return out;
+		}
 
-            const newX = exp * (x * c + ((v + z * w * x) / wd) * s);
-            const newV = exp * (v * c - ((v * z * w + w * w * x) / wd) * s);
+		const x0 = position - target;
+		const v0 = velocity;
 
-            posVel[0] = newX + target;
-            posVel[1] = newV;
-        } else if (z > 1.0001) {
-            // Over-damped decay
-            const s = Math.sqrt(z * z - 1.0);
-            const w1 = w * (z - s);
-            const w2 = w * (z + s);
-            const exp1 = Math.exp(-w1 * dt);
-            const exp2 = Math.exp(-w2 * dt);
+		if (Math.abs(zeta - 1.0) <= 1e-5) {
+			// Critically damped (zeta == 1)
+			const exp = Math.exp(-omega * dt);
+			const c1 = x0;
+			const c2 = v0 + omega * x0;
+			out[0] = target + (c1 + c2 * dt) * exp;
+			out[1] = (c2 - omega * (c1 + c2 * dt)) * exp;
+		} else if (zeta < 1.0) {
+			// Under-damped (0 <= zeta < 1)
+			const omegaD = omega * Math.sqrt(1.0 - zeta * zeta);
+			const exp = Math.exp(-zeta * omega * dt);
+			const cos = Math.cos(omegaD * dt);
+			const sin = Math.sin(omegaD * dt);
 
-            const c1 = (v + w2 * x) / (2.0 * w * s);
-            const c2 = (-v - w1 * x) / (2.0 * w * s);
+			const c1 = x0;
+			const c2 = (v0 + zeta * omega * x0) / omegaD;
 
-            posVel[0] = c1 * exp1 + c2 * exp2 + target;
-            posVel[1] = -c1 * w1 * exp1 - c2 * w2 * exp2;
-        } else {
-            // Critically damped
-            const exp = Math.exp(-w * dt);
-            const c2 = v + w * x;
+			out[0] = target + exp * (c1 * cos + c2 * sin);
+			out[1] =
+				exp *
+				((c2 * omegaD - c1 * zeta * omega) * cos -
+					(c1 * omegaD + c2 * zeta * omega) * sin);
+		} else {
+			// Over-damped (zeta > 1)
+			const alpha = omega * Math.sqrt(zeta * zeta - 1.0);
+			const r1 = -omega * zeta + alpha;
+			const r2 = -omega * zeta - alpha;
 
-            posVel[0] = (x + c2 * dt) * exp + target;
-            posVel[1] = (v - c2 * w * dt) * exp;
-        }
-    }
+			const c2 = (v0 - r1 * x0) / (r2 - r1);
+			const c1 = x0 - c2;
 
-    /**
-     * Updates N-dimensional vector in-place.
-     * posArray[posOffset .. posOffset + dim - 1] = positions
-     * velArray[velOffset .. velOffset + dim - 1] = velocities
-     */
-    updateVector(
-        posArray: Float32Array | number[],
-        velArray: Float32Array | number[],
-        targetArray: ArrayLike<number>,
-        dimension: number,
-        deltaSec: number,
-        posOffset = 0,
-        velOffset = 0,
-        targetOffset = 0
-    ): void {
-        const temp = [0, 0];
-        for (let d = 0; d < dimension; d++) {
-            temp[0] = posArray[posOffset + d];
-            temp[1] = velArray[velOffset + d];
-            this.update(temp, targetArray[targetOffset + d], deltaSec);
-            posArray[posOffset + d] = temp[0];
-            velArray[velOffset + d] = temp[1];
-        }
-    }
+			const e1 = Math.exp(r1 * dt);
+			const e2 = Math.exp(r2 * dt);
+
+			out[0] = target + c1 * e1 + c2 * e2;
+			out[1] = c1 * r1 * e1 + c2 * r2 * e2;
+		}
+
+		return out;
+	}
+
+	/**
+	 * Advances an N-dimensional vector spring state in-place within `positions` and `velocities`.
+	 */
+	updateVector(
+		positions: number[] | Float32Array,
+		velocities: number[] | Float32Array,
+		targets: ArrayLike<number>,
+		dt: number,
+		scratch: [number, number] | Float32Array = _springScratch
+	): void {
+		if (!Number.isFinite(dt) || dt < 0) {
+			throw new RangeError(`Spring.updateVector: dt must be a finite non-negative number, got ${dt}.`);
+		}
+		if (dt === 0) {
+			return;
+		}
+		const len = Math.min(positions.length, velocities.length, targets.length);
+		for (let i = 0; i < len; i++) {
+			this.updateScalar(positions[i], velocities[i], targets[i], dt, scratch);
+			positions[i] = scratch[0];
+			velocities[i] = scratch[1];
+		}
+	}
 }

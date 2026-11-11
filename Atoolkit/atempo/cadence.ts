@@ -1,132 +1,254 @@
 /**
- * Temporal stepping, decay convergence, and damping operators.
+ * Overflow handling policy for `FixedCadence` when frame delta exceeds `maxStepsPerFrame * fixedStepSec`.
+ * - `"drop"`: Discards excess accumulated time beyond `maxStepsPerFrame` steps to prevent catch-up spirals.
+ * - `"retain"`: Retains excess accumulated time for subsequent `update()` calls.
  */
+export type FixedCadenceOverflowPolicy = "drop" | "retain";
 
+const LN2 = Math.LN2;
+
+/**
+ * Stateless frame-rate independent exponential decay, critically damped smoothing, and quantization utilities.
+ */
 export class Cadence {
-    /**
-     * Quantizes continuous timestamp into discrete stepped intervals.
-     */
-    static quantizeTime(time: number, targetFps: number): number {
-        if (targetFps <= 0) return time;
-        return Math.floor(time * targetFps) / targetFps;
-    }
+	/**
+	 * Frame-rate independent exponential decay towards a target value using decay rate `decay` (`>= 0`).
+	 * Formula: `target + (current - target) * exp(-decay * deltaSec)`
+	 */
+	static expDecay(current: number, target: number, decay: number, deltaSec: number): number {
+		if (!Number.isFinite(deltaSec) || deltaSec < 0) {
+			throw new RangeError(
+				`Cadence.expDecay: deltaSec must be a finite non-negative number, got ${deltaSec}.`
+			);
+		}
+		if (!Number.isFinite(decay) || decay < 0) {
+			throw new RangeError(
+				`Cadence.expDecay: decay must be a finite non-negative number, got ${decay}.`
+			);
+		}
+		if (deltaSec === 0 || decay === 0) {
+			return current;
+		}
+		return target + (current - target) * Math.exp(-decay * deltaSec);
+	}
 
-    /**
-     * Exponential half-life decay.
-     * Converges toward target such that remaining distance halves every halfLife seconds.
-     *
-     * @param current Current value
-     * @param target Destination value
-     * @param halfLife Duration in seconds to close half the remaining gap
-     * @param deltaSec Elapsed frame time in seconds
-     */
-    static decay(current: number, target: number, halfLife: number, deltaSec: number): number {
-        if (halfLife <= 0) return target;
-        const decayFactor = Math.exp((-0.69314718056 * deltaSec) / halfLife);
-        return target + (current - target) * decayFactor;
-    }
+	/**
+	 * Half-life exponential decay closing half the remaining gap every `halfLife` seconds (`> 0`).
+	 */
+	static decay(current: number, target: number, halfLife: number, deltaSec: number): number {
+		if (!Number.isFinite(deltaSec) || deltaSec < 0) {
+			throw new RangeError(
+				`Cadence.decay: deltaSec must be a finite non-negative number, got ${deltaSec}.`
+			);
+		}
+		if (!Number.isFinite(halfLife) || halfLife <= 0) {
+			throw new RangeError(
+				`Cadence.decay: halfLife must be a finite positive number, got ${halfLife}.`
+			);
+		}
+		if (deltaSec === 0) {
+			return current;
+		}
+		const factor = Math.exp((-LN2 * deltaSec) / halfLife);
+		return target + (current - target) * factor;
+	}
 
-    /**
-     * Critically damped spring follower.
-     * Drives current towards target over smoothTime. Mutates velocityRef[0] in-place.
-     *
-     * @param current Current position
-     * @param target Target position
-     * @param velocityRef Array containing velocity at index 0
-     * @param smoothTime Expected duration in seconds to reach target
-     * @param deltaSec Elapsed time in seconds
-     * @param maxSpeed Maximum velocity clamp
-     */
-    static damp(
-        current: number,
-        target: number,
-        velocityRef: Float32Array | number[],
-        smoothTime: number,
-        deltaSec: number,
-        maxSpeed = Number.POSITIVE_INFINITY
-    ): number {
-        const omega = 2 / Math.max(0.0001, smoothTime);
-        const x = omega * deltaSec;
-        const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+	/**
+	 * Frame-rate independent exponential decay for vector/array types.
+	 */
+	static expDecayVector<T extends number[] | Float32Array>(
+		current: ArrayLike<number>,
+		target: ArrayLike<number>,
+		decay: number,
+		deltaSec: number,
+		out: T
+	): T {
+		if (!Number.isFinite(deltaSec) || deltaSec < 0) {
+			throw new RangeError(
+				`Cadence.expDecayVector: deltaSec must be a finite non-negative number, got ${deltaSec}.`
+			);
+		}
+		if (!Number.isFinite(decay) || decay < 0) {
+			throw new RangeError(
+				`Cadence.expDecayVector: decay must be a finite non-negative number, got ${decay}.`
+			);
+		}
+		const len = Math.min(current.length, target.length, out.length);
+		if (deltaSec === 0 || decay === 0) {
+			for (let i = 0; i < len; i++) {
+				out[i] = current[i];
+			}
+			return out;
+		}
+		const factor = Math.exp(-decay * deltaSec);
+		for (let i = 0; i < len; i++) {
+			const c = current[i];
+			const t = target[i];
+			out[i] = t + (c - t) * factor;
+		}
+		return out;
+	}
 
-        let change = current - target;
-        const originalTo = target;
+	/**
+	 * Critically damped spring-damper smoothing (Game Programming Gems 4, Chapter 1.10).
+	 * When `deltaSec` is 0, returns `current` and leaves `velocityRef[0]` unchanged.
+	 * Throws a `RangeError` if `deltaSec` is negative or non-finite.
+	 */
+	static damp(
+		current: number,
+		target: number,
+		smoothTime: number,
+		maxSpeed = Infinity,
+		deltaSec: number,
+		velocityRef: [number] | Float32Array
+	): number {
+		if (!Number.isFinite(deltaSec) || deltaSec < 0) {
+			throw new RangeError(
+				`Cadence.damp: deltaSec must be a finite non-negative number, got ${deltaSec}.`
+			);
+		}
+		if (deltaSec === 0) {
+			return current;
+		}
 
-        const maxChange = maxSpeed * smoothTime;
-        change = Math.max(-maxChange, Math.min(maxChange, change));
-        target = current - change;
+		const st = Math.max(0.0001, smoothTime);
+		const omega = 2.0 / st;
 
-        const temp = (velocityRef[0] + omega * change) * deltaSec;
-        velocityRef[0] = (velocityRef[0] - omega * temp) * exp;
-        let output = target + (change + temp) * exp;
+		const x = omega * deltaSec;
+		const exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
 
-        if (originalTo - current > 0 === output > originalTo) {
-            output = originalTo;
-            velocityRef[0] = (output - originalTo) / deltaSec;
-        }
+		let change = current - target;
+		const originalTo = target;
 
-        return output;
-    }
+		const maxChange = maxSpeed * st;
+		change = Math.max(-maxChange, Math.min(maxChange, change));
+		const clampedTarget = current - change;
 
-    /**
-     * Rejects updates where value change is below threshold.
-     */
-    static hysteresis(current: number, target: number, threshold: number): number {
-        return Math.abs(target - current) >= threshold ? target : current;
-    }
+		const temp = (velocityRef[0] + omega * change) * deltaSec;
+		velocityRef[0] = (velocityRef[0] - omega * temp) * exp;
+		let output = clampedTarget + (change + temp) * exp;
 
-    /**
-     * Checks whether elapsed duration exceeds cooldown interval.
-     */
-    static debounce(time: number, lastTriggerTime: number, cooldown: number): boolean {
-        return time - lastTriggerTime >= cooldown;
-    }
+		if (originalTo - current > 0.0 === output > originalTo) {
+			output = originalTo;
+			velocityRef[0] = (output - originalTo) / deltaSec;
+		}
+
+		return output;
+	}
+
+	/**
+	 * Snaps continuous timestamp `time` to stepped frame interval `floor(time * targetFps) / targetFps`.
+	 */
+	static quantizeTime(time: number, targetFps: number): number {
+		if (!Number.isFinite(time) || !Number.isFinite(targetFps) || targetFps <= 0) {
+			throw new RangeError(
+				`Cadence.quantizeTime: time must be finite and targetFps must be > 0, got time=${time}, targetFps=${targetFps}.`
+			);
+		}
+		return Math.floor(time * targetFps) / targetFps;
+	}
+
+	/**
+	 * Returns `target` only when `|target - current| >= threshold`, otherwise preserves `current`.
+	 */
+	static hysteresis(current: number, target: number, threshold: number): number {
+		return Math.abs(target - current) >= threshold ? target : current;
+	}
+
+	/**
+	 * Returns `true` when `time - lastTriggerTime >= cooldown`.
+	 */
+	static debounce(time: number, lastTriggerTime: number, cooldown: number): boolean {
+		return time - lastTriggerTime >= cooldown;
+	}
 }
 
 /**
- * Fixed timestep simulation accumulator.
- * Accumulates variable delta times into deterministic discrete steps with fractional alpha.
+ * Deterministic fixed-timestep accumulator.
+ *
+ * Accumulates variable frame deltas and dispatches fixed-duration steps up to `maxStepsPerFrame`.
  */
 export class FixedCadence {
-    readonly fixedDelta: number;
-    readonly maxSubSteps: number;
-    private accumulator = 0;
-    private simulationTime = 0;
+	readonly fixedStepSec: number;
+	readonly maxStepsPerFrame: number;
+	readonly overflowPolicy: FixedCadenceOverflowPolicy;
+	#accumulator = 0;
+	#simulationTime = 0;
 
-    constructor(targetHz = 60, maxSubSteps = 5) {
-        this.fixedDelta = 1 / Math.max(1, targetHz);
-        this.maxSubSteps = Math.max(1, maxSubSteps);
-    }
+	constructor(
+		fixedStepSec = 1 / 60,
+		maxStepsPerFrame = 8,
+		overflowPolicy: FixedCadenceOverflowPolicy = "drop"
+	) {
+		if (!Number.isFinite(fixedStepSec) || fixedStepSec <= 0) {
+			throw new RangeError(
+				`FixedCadence: fixedStepSec must be a finite positive number, got ${fixedStepSec}.`
+			);
+		}
+		if (!Number.isInteger(maxStepsPerFrame) || maxStepsPerFrame < 1) {
+			throw new RangeError(
+				`FixedCadence: maxStepsPerFrame must be a positive integer, got ${maxStepsPerFrame}.`
+			);
+		}
+		this.fixedStepSec = fixedStepSec;
+		this.maxStepsPerFrame = maxStepsPerFrame;
+		this.overflowPolicy = overflowPolicy;
+	}
 
-    /**
-     * Accumulates deltaSec and invokes stepCallback for each discrete step.
-     * Returns fractional alpha in [0, 1) for state interpolation.
-     */
-    update(deltaSec: number, stepCallback: (fixedDelta: number, simTime: number) => void): number {
-        const clampedDelta = Math.min(0.2, Math.max(0, deltaSec));
-        this.accumulator += clampedDelta;
+	/**
+	 * Advances the accumulator by `deltaSec` and invokes `stepFn(fixedStepSec, simulationTime)` for each full step.
+	 * Returns `{ stepsTaken, alpha }` where `alpha` is the residual interpolation factor in `[0, 1)`.
+	 */
+	update(
+		deltaSec: number,
+		stepFn: (fixedDt: number, simTime: number) => void
+	): { stepsTaken: number; alpha: number } {
+		if (!Number.isFinite(deltaSec) || deltaSec < 0) {
+			throw new RangeError(
+				`FixedCadence.update: deltaSec must be a finite non-negative number, got ${deltaSec}.`
+			);
+		}
+		if (deltaSec === 0) {
+			return {
+				stepsTaken: 0,
+				alpha: Math.min(1, this.#accumulator / this.fixedStepSec),
+			};
+		}
 
-        let steps = 0;
-        while (this.accumulator >= this.fixedDelta && steps < this.maxSubSteps) {
-            stepCallback(this.fixedDelta, this.simulationTime);
-            this.simulationTime += this.fixedDelta;
-            this.accumulator -= this.fixedDelta;
-            steps++;
-        }
+		this.#accumulator += deltaSec;
 
-        if (steps >= this.maxSubSteps) {
-            this.accumulator = 0;
-        }
+		let stepsTaken = 0;
+		while (this.#accumulator >= this.fixedStepSec && stepsTaken < this.maxStepsPerFrame) {
+			this.#simulationTime += this.fixedStepSec;
+			stepFn(this.fixedStepSec, this.#simulationTime);
+			this.#accumulator -= this.fixedStepSec;
+			stepsTaken++;
+		}
 
-        return this.accumulator / this.fixedDelta;
-    }
+		if (this.#accumulator >= this.fixedStepSec && this.overflowPolicy === "drop") {
+			this.#accumulator = 0;
+		}
 
-    get totalSimulationTime(): number {
-        return this.simulationTime;
-    }
+		const alpha =
+			this.overflowPolicy === "drop"
+				? this.#accumulator / this.fixedStepSec
+				: Math.min(1, this.#accumulator / this.fixedStepSec);
+		return { stepsTaken, alpha };
+	}
 
-    reset(): void {
-        this.accumulator = 0;
-        this.simulationTime = 0;
-    }
+	/** Current residual time in seconds stored in the accumulator. */
+	get accumulator(): number {
+		return this.#accumulator;
+	}
+
+	/** Total simulated time in seconds across all executed fixed steps. */
+	get simulationTime(): number {
+		return this.#simulationTime;
+	}
+
+	/** Resets accumulated and simulated time to zero. */
+	reset(): void {
+		this.#accumulator = 0;
+		this.#simulationTime = 0;
+	}
 }

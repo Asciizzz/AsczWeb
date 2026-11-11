@@ -1,130 +1,181 @@
+import {
+	SocketDirection,
+	type SocketType,
+	type Metadata,
+	type ChipProcessor,
+	type SerializedChip,
+} from "./types.js";
 import { Socket } from "./socket.js";
-import type { ProcessCtx } from "./types.js";
 
 /**
- * Stateless computational unit with 1-to-1 input sockets and 1-to-N output sockets.
+ * Processing node in a Circuit with typed input and output sockets.
+ *
+ * Structural ownership contract:
+ * - While a Chip is registered in one or more Circuits, its input/output port schema
+ *   is locked (`isSchemaLocked === true`). Attempting to add or remove sockets on a
+ *   locked Chip throws an Error. To modify a chip's schema, remove it from the circuit
+ *   or replace it via `circuit.replaceChip(...)`.
  */
-export abstract class Chip {
-    readonly id: string;
-    readonly name: string;
-    readonly inputs = new Map<string, Socket>();
-    readonly outputs = new Map<string, Socket>();
-    readonly metadata: Record<string, any> = {};
+export class Chip<
+	TIn extends Record<string, unknown> = Record<string, unknown>,
+	TOut extends Record<string, unknown> = Record<string, unknown>
+> {
+	readonly id: string;
+	label: string;
+	readonly #inputs = new Map<string, Socket>();
+	readonly #outputs = new Map<string, Socket>();
+	readonly metadata: Metadata;
+	process: ChipProcessor<TIn, TOut>;
+	#lockedCount = 0;
 
-    constructor(id: string, name: string) {
-        this.id = id;
-        this.name = name;
-    }
+	constructor(
+		id: string,
+		label = id,
+		process: ChipProcessor<TIn, TOut> = () => {},
+		metadata: Metadata = {}
+	) {
+		if (!id || typeof id !== "string") {
+			throw new Error("Chip id must be a non-empty string.");
+		}
+		this.id = id;
+		this.label = label;
+		this.process = process;
+		this.metadata = { ...metadata };
+	}
 
-    /**
-     * Registers an input socket.
-     */
-    addInput(socketOrName: Socket | string, dataType?: string, required = true): this {
-        let socket: Socket;
-        if (typeof socketOrName === "string") {
-            socket = new Socket(socketOrName, "input", dataType, required);
-        } else {
-            socket = socketOrName;
-        }
-        if (socket.direction !== "input") {
-            throw new Error(`[Chip] Input socket "${socket.name}" must have input direction.`);
-        }
-        this.inputs.set(socket.name, socket);
-        return this;
-    }
+	/** True when this chip is currently attached to at least one Circuit. */
+	get isSchemaLocked(): boolean {
+		return this.#lockedCount > 0;
+	}
 
-    /**
-     * Registers an output socket.
-     */
-    addOutput(socketOrName: Socket | string, dataType?: string): this {
-        let socket: Socket;
-        if (typeof socketOrName === "string") {
-            socket = new Socket(socketOrName, "output", dataType, false);
-        } else {
-            socket = socketOrName;
-        }
-        if (socket.direction !== "output") {
-            throw new Error(`[Chip] Output socket "${socket.name}" must have output direction.`);
-        }
-        this.outputs.set(socket.name, socket);
-        return this;
-    }
+	/** Internal circuit attachment hook locking the chip's port schema. */
+	_lockSchema(): void {
+		this.#lockedCount++;
+	}
 
-    hasInput(name: string): boolean { return this.inputs.has(name); }
-    hasOutput(name: string): boolean { return this.outputs.has(name); }
+	/** Internal circuit detachment hook unlocking the chip's port schema. */
+	_unlockSchema(): void {
+		if (this.#lockedCount > 0) {
+			this.#lockedCount--;
+		}
+	}
 
-    getInput<T extends Socket = Socket>(name: string): T | undefined {
-        return this.inputs.get(name) as T | undefined;
-    }
+	#assertUnlocked(op: string): void {
+		if (this.#lockedCount > 0) {
+			throw new Error(
+				`Chip.${op}: cannot modify socket schema of chip '${this.id}' while it is attached to a Circuit.`
+			);
+		}
+	}
 
-    getOutput<T extends Socket = Socket>(name: string): T | undefined {
-        return this.outputs.get(name) as T | undefined;
-    }
+	/** Snapshot of input sockets keyed by socket name. Mutating the returned Map does not affect the Chip. */
+	get inputs(): ReadonlyMap<string, Socket> {
+		return new Map(this.#inputs);
+	}
 
-    /**
-     * Connection validation gate invoked prior to establishing a wire.
-     * Enforces socket existence and dataType compatibility when types are declared.
-     */
-    canConnectInput(
-        inSocketName: string,
-        outChip: Chip,
-        outSocketName: string
-    ): boolean {
-        const inSocket = this.getInput(inSocketName);
-        const outSocket = outChip.getOutput(outSocketName);
-        if (!inSocket || !outSocket) return true;
+	/** Snapshot of output sockets keyed by socket name. Mutating the returned Map does not affect the Chip. */
+	get outputs(): ReadonlyMap<string, Socket> {
+		return new Map(this.#outputs);
+	}
 
-        if (inSocket.dataType !== undefined && outSocket.dataType !== undefined) {
-            if (inSocket.dataType === "any" || outSocket.dataType === "any") return true;
-            if (inSocket.dataType !== outSocket.dataType) return false;
-        }
-        return true;
-    }
+	/** Returns the input socket with the given name, or undefined if absent. */
+	getInput(name: string): Socket | undefined {
+		return this.#inputs.get(name);
+	}
 
-    /**
-     * Evaluates the chip from one execution's resolved input values.
-     * Input and output values belong to the circuit run, not to the chip.
-     */
-    abstract process(
-        inputs: Record<string, any>,
-        ctx?: ProcessCtx<any>
-    ): Record<string, any>;
-}
+	/** Returns the output socket with the given name, or undefined if absent. */
+	getOutput(name: string): Socket | undefined {
+		return this.#outputs.get(name);
+	}
 
-/**
- * Transparent proxy chip delegating execution and configuration to a source chip.
- */
-export class ChipProxy extends Chip {
-    readonly sourceChip: Chip;
+	/** Returns true if an input socket with the given name exists. */
+	hasInput(name: string): boolean {
+		return this.#inputs.has(name);
+	}
 
-    constructor(id: string, sourceChip: Chip) {
-        super(id, sourceChip.name);
-        this.sourceChip = sourceChip;
-        for (const socket of sourceChip.inputs.values()) {
-            this.addInput(socket.name, socket.dataType, socket.required);
-        }
-        for (const socket of sourceChip.outputs.values()) {
-            this.addOutput(socket.name, socket.dataType);
-        }
-        Object.assign(this.metadata, sourceChip.metadata);
-    }
+	/** Returns true if an output socket with the given name exists. */
+	hasOutput(name: string): boolean {
+		return this.#outputs.has(name);
+	}
 
-    override canConnectInput(
-        inSocketName: string,
-        outChip: Chip,
-        outSocketName: string
-    ): boolean {
-        return this.sourceChip.canConnectInput(inSocketName, outChip, outSocketName);
-    }
+	/** Internal iterator over input sockets without Map snapshot allocation. */
+	_inputSockets(): IterableIterator<Socket> {
+		return this.#inputs.values();
+	}
 
-    override process(
-        inputs: Record<string, any>,
-        ctx?: ProcessCtx<any>
-    ): Record<string, any> {
-        return this.sourceChip.process(inputs, ctx);
-    }
+	/** Internal iterator over output sockets without Map snapshot allocation. */
+	_outputSockets(): IterableIterator<Socket> {
+		return this.#outputs.values();
+	}
 
-    clone(newId: string): ChipProxy {
-        return new ChipProxy(newId, this.sourceChip);
-    }
+	/** Declares an input socket on this chip. Throws if the chip is currently attached to a Circuit. */
+	addInput<T = unknown>(
+		name: string,
+		type: SocketType,
+		defaultValue?: T,
+		metadata: Metadata = {}
+	): this {
+		this.#assertUnlocked("addInput");
+		if (this.#inputs.has(name)) {
+			throw new Error(`Input socket '${name}' already exists on chip '${this.id}'.`);
+		}
+		this.#inputs.set(
+			name,
+			new Socket(name, type, SocketDirection.Input, defaultValue, metadata)
+		);
+		return this;
+	}
+
+	/** Declares an output socket on this chip. Throws if the chip is currently attached to a Circuit. */
+	addOutput<T = unknown>(
+		name: string,
+		type: SocketType,
+		defaultValue?: T,
+		metadata: Metadata = {}
+	): this {
+		this.#assertUnlocked("addOutput");
+		if (this.#outputs.has(name)) {
+			throw new Error(`Output socket '${name}' already exists on chip '${this.id}'.`);
+		}
+		this.#outputs.set(
+			name,
+			new Socket(name, type, SocketDirection.Output, defaultValue, metadata)
+		);
+		return this;
+	}
+
+	/** Removes an input socket by name. Throws if the chip is currently attached to a Circuit. */
+	removeInput(name: string): boolean {
+		this.#assertUnlocked("removeInput");
+		return this.#inputs.delete(name);
+	}
+
+	/** Removes an output socket by name. Throws if the chip is currently attached to a Circuit. */
+	removeOutput(name: string): boolean {
+		this.#assertUnlocked("removeOutput");
+		return this.#outputs.delete(name);
+	}
+
+	/** Serializes this chip's topology metadata and socket definitions (excluding its processor function). */
+	toJSON(): SerializedChip {
+		return {
+			id: this.id,
+			label: this.label,
+			inputs: Array.from(this.#inputs.values()).map((s) => s.toJSON()),
+			outputs: Array.from(this.#outputs.values()).map((s) => s.toJSON()),
+			metadata: { ...this.metadata },
+		};
+	}
+
+	/** Reconstructs a Chip's socket topology from serialized data using the optional processor function. */
+	static fromJSON(data: SerializedChip, process?: ChipProcessor): Chip {
+		const chip = new Chip(data.id, data.label, process, { ...data.metadata });
+		for (const sData of data.inputs) {
+			chip.#inputs.set(sData.name, Socket.fromJSON(sData));
+		}
+		for (const sData of data.outputs) {
+			chip.#outputs.set(sData.name, Socket.fromJSON(sData));
+		}
+		return chip;
+	}
 }

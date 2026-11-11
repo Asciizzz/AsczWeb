@@ -1,351 +1,591 @@
-// ================================================================
-//  Awgpu - Level 3: Resource Binding System (BindLayout, BindTable)
-// ================================================================
-
-import { type Device, resolveDevice } from "./device.js";
-import { type Buffer, type Texture, type Sampler, type BufferSlice, resolveTextureView } from "./memory.js";
+import { type Device, resolveDevice, getResourceId } from "./device.js";
+import { Buffer, type BufferSlice, isBufferSlice, Texture, getRegisteredTextureViewOwner } from "./memory.js";
+import { resolveTextureView, type TextureSourceRef } from "./stream.js";
 
 /**
- * Standardized 4-tier WebGPU update frequency slots.
+ * Optional semantic slot-frequency convention (0..3).
+ * Raw numeric bind group indices (0, 1, 2, 3) can be used directly everywhere.
  */
 export enum SlotFrequency {
-    PerFrame = 0,     // ViewProj, Viewport, Time, Globals
-    PerPhase = 1,     // Environment maps, shadow atlases, phase buffers
-    PerBatch = 2,     // Surface properties, data textures, samplers, storage buffers
-    PerInstance = 3,  // Per-draw dynamic transforms, bone matrices
+	PerFrame = 0,
+	PerPass = 1,
+	PerBatch = 2,
+	PerInstance = 3,
 }
 
-export type ResourceBinding =
-    | GPUBufferBinding
-    | GPUTextureView
-    | GPUSampler
-    | Buffer
-    | Texture
-    | Sampler
-    | BufferSlice
-    | GPUBuffer
-    | GPUTexture;
+export type BindResource =
+	| Buffer
+	| BufferSlice
+	| GPUBufferBinding
+	| Texture
+	| GPUTexture
+	| GPUTextureView
+	| GPUSampler
+	| GPUExternalTexture;
 
-/**
- * Resolves a high-level or raw resource into a native GPUBindingResource descriptor.
- */
-export function resolveBindingResource(res: ResourceBinding): GPUBindingResource {
-    if ("byteOffset" in res) {
-        // BufferSlice
-        const rawBuf = "native" in res.buffer ? res.buffer.native : res.buffer;
-        return {
-            buffer: rawBuf,
-            offset: res.byteOffset,
-            size: res.byteLength,
-        };
-    }
-    if ("native" in res) {
-        // Buffer, Sampler, or Texture wrapper
-        if ("view" in res) {
-            return (res as Texture).view;
-        }
-        if ("usage" in res) {
-            return { buffer: (res as Buffer).native };
-        }
-        return (res as Sampler).native;
-    }
-    if ("createView" in res) {
-        // Raw GPUTexture: resolve via cached default view
-        return resolveTextureView(res as GPUTexture);
-    }
-    if ("size" in res && "usage" in res) {
-        // Raw GPUBuffer
-        return { buffer: res as GPUBuffer };
-    }
-    return res as GPUBindingResource;
+export type ResourceBinding = BindResource;
+export type BindingEntry = BindEntry;
+
+export interface BindEntry {
+	binding: number;
+	resource: BindResource;
 }
 
-/**
- * Fluent builder for creating GPUBindGroupLayout descriptors.
- */
 export class BindLayout {
-    readonly native: GPUBindGroupLayout;
-    readonly label: string;
+	readonly native: GPUBindGroupLayout;
+	readonly entries: readonly GPUBindGroupLayoutEntry[];
+	readonly label?: string;
 
-    constructor(native: GPUBindGroupLayout, label = "BindLayout") {
-        this.native = native;
-        this.label = label;
-    }
+	constructor(
+		device: Device | GPUDevice,
+		entries: GPUBindGroupLayoutEntry[],
+		label?: string
+	) {
+		const rawDevice = resolveDevice(device);
+		const clonedEntries = entries.map((e) => ({ ...e }));
+		this.entries = Object.freeze(clonedEntries);
+		this.label = label;
+		this.native = rawDevice.createBindGroupLayout({
+			label,
+			entries: clonedEntries,
+		});
+	}
 
-    /**
-     * Builder factory for fluent layout construction.
-     */
-    static builder(): BindLayoutBuilder {
-        return new BindLayoutBuilder();
-    }
-
-    /**
-     * Creates BindLayout from raw GPUBindGroupLayoutEntry array.
-     */
-    static create(
-        device: Device | GPUDevice,
-        entries: GPUBindGroupLayoutEntry[],
-        label = "BindLayout"
-    ): BindLayout {
-        const gpu = resolveDevice(device);
-        const native = gpu.createBindGroupLayout({ label, entries });
-        return new BindLayout(native, label);
-    }
+	static builder(): BindLayoutBuilder {
+		return new BindLayoutBuilder();
+	}
 }
 
 export class BindLayoutBuilder {
-    private entries: GPUBindGroupLayoutEntry[] = [];
+	readonly #entries: GPUBindGroupLayoutEntry[] = [];
 
-    addUniform(
-        binding: number,
-        visibility: GPUShaderStageFlags = GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-        options: { hasDynamicOffset?: boolean; minBindingSize?: number } = {}
-    ): this {
-        this.entries.push({
-            binding,
-            visibility,
-            buffer: {
-                type: "uniform",
-                hasDynamicOffset: options.hasDynamicOffset ?? false,
-                minBindingSize: options.minBindingSize,
-            },
-        });
-        return this;
-    }
+	addUniform(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		options?: { hasDynamicOffset?: boolean; minBindingSize?: number }
+	): this {
+		this.#entries.push({
+			binding,
+			visibility,
+			buffer: {
+				type: "uniform",
+				hasDynamicOffset: options?.hasDynamicOffset ?? false,
+				minBindingSize: options?.minBindingSize,
+			},
+		});
+		return this;
+	}
 
-    addStorage(
-        binding: number,
-        visibility: GPUShaderStageFlags = GPUShaderStage.COMPUTE | GPUShaderStage.FRAGMENT,
-        options: { readOnly?: boolean; hasDynamicOffset?: boolean; minBindingSize?: number } = {}
-    ): this {
-        const type: GPUBufferBindingType = (options.readOnly ?? true) ? "read-only-storage" : "storage";
-        this.entries.push({
-            binding,
-            visibility,
-            buffer: {
-                type,
-                hasDynamicOffset: options.hasDynamicOffset ?? false,
-                minBindingSize: options.minBindingSize,
-            },
-        });
-        return this;
-    }
+	addStorage(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		options?: { readOnly?: boolean; hasDynamicOffset?: boolean; minBindingSize?: number }
+	): this {
+		this.#entries.push({
+			binding,
+			visibility,
+			buffer: {
+				type: options?.readOnly ? "read-only-storage" : "storage",
+				hasDynamicOffset: options?.hasDynamicOffset ?? false,
+				minBindingSize: options?.minBindingSize,
+			},
+		});
+		return this;
+	}
 
-    addTexture(
-        binding: number,
-        visibility: GPUShaderStageFlags = GPUShaderStage.FRAGMENT,
-        options: {
-            sampleType?: GPUTextureSampleType;
-            viewDimension?: GPUTextureViewDimension;
-            multisampled?: boolean;
-        } = {}
-    ): this {
-        this.entries.push({
-            binding,
-            visibility,
-            texture: {
-                sampleType: options.sampleType ?? "float",
-                viewDimension: options.viewDimension ?? "2d",
-                multisampled: options.multisampled ?? false,
-            },
-        });
-        return this;
-    }
+	addTexture(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		options?: {
+			sampleType?: GPUTextureSampleType;
+			viewDimension?: GPUTextureViewDimension;
+			multisampled?: boolean;
+		}
+	): this {
+		this.#entries.push({
+			binding,
+			visibility,
+			texture: {
+				sampleType: options?.sampleType ?? "float",
+				viewDimension: options?.viewDimension ?? "2d",
+				multisampled: options?.multisampled ?? false,
+			},
+		});
+		return this;
+	}
 
-    addStorageTexture(
-        binding: number,
-        format: GPUTextureFormat,
-        visibility: GPUShaderStageFlags = GPUShaderStage.COMPUTE,
-        options: {
-            access?: GPUStorageTextureAccess;
-            viewDimension?: GPUTextureViewDimension;
-        } = {}
-    ): this {
-        this.entries.push({
-            binding,
-            visibility,
-            storageTexture: {
-                access: options.access ?? "write-only",
-                format,
-                viewDimension: options.viewDimension ?? "2d",
-            },
-        });
-        return this;
-    }
+	addStorageTexture(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		format: GPUTextureFormat,
+		options?: {
+			access?: GPUStorageTextureAccess;
+			viewDimension?: GPUTextureViewDimension;
+		}
+	): this {
+		this.#entries.push({
+			binding,
+			visibility,
+			storageTexture: {
+				access: options?.access ?? "write-only",
+				format,
+				viewDimension: options?.viewDimension ?? "2d",
+			},
+		});
+		return this;
+	}
 
-    addSampler(
-        binding: number,
-        visibility: GPUShaderStageFlags = GPUShaderStage.FRAGMENT,
-        options: { comparison?: boolean } = {}
-    ): this {
-        this.entries.push({
-            binding,
-            visibility,
-            sampler: {
-                type: options.comparison ? "comparison" : "filtering",
-            },
-        });
-        return this;
-    }
+	addSampler(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		options?: {
+			type?: GPUSamplerBindingType;
+			comparison?: boolean;
+		}
+	): this {
+		const type = options?.type ?? (options?.comparison ? "comparison" : "filtering");
+		this.#entries.push({
+			binding,
+			visibility,
+			sampler: { type },
+		});
+		return this;
+	}
 
-    build(device: Device | GPUDevice, label = "BindLayout"): BindLayout {
-        return BindLayout.create(device, this.entries, label);
-    }
+	build(device: Device | GPUDevice, label?: string): BindLayout {
+		return new BindLayout(device, [...this.#entries], label);
+	}
+
+	uniform(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		options?: { hasDynamicOffset?: boolean; minBindingSize?: number }
+	): this {
+		return this.addUniform(binding, visibility, options);
+	}
+
+	storage(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		options?: { readOnly?: boolean; hasDynamicOffset?: boolean; minBindingSize?: number }
+	): this {
+		return this.addStorage(binding, visibility, options);
+	}
+
+	texture(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		options?: {
+			sampleType?: GPUTextureSampleType;
+			viewDimension?: GPUTextureViewDimension;
+			multisampled?: boolean;
+		}
+	): this {
+		return this.addTexture(binding, visibility, options);
+	}
+
+	storageTexture(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		format: GPUTextureFormat,
+		options?: {
+			access?: GPUStorageTextureAccess;
+			viewDimension?: GPUTextureViewDimension;
+		}
+	): this {
+		return this.addStorageTexture(binding, visibility, format, options);
+	}
+
+	sampler(
+		binding: number,
+		visibility: GPUShaderStageFlags,
+		options?: {
+			type?: GPUSamplerBindingType;
+			comparison?: boolean;
+		}
+	): this {
+		return this.addSampler(binding, visibility, options);
+	}
 }
 
-export interface BindingEntry {
-    binding: number;
-    resource: ResourceBinding;
+export interface BindTableDescriptor {
+	layout: BindLayout | GPUBindGroupLayout;
+	entries: BindEntry[];
+	/** Optional slot index or SlotFrequency hint associated with this wrapper. */
+	slot?: SlotFrequency | number;
+	label?: string;
+	/** Explicit number of dynamic offset bindings if layout is a raw GPUBindGroupLayout. */
+	dynamicOffsetCount?: number;
+}
+
+export function resolveBindingResource(res: BindResource): GPUBindingResource {
+	return resolveNativeBindingResource(res);
+}
+
+export function hashBindingEntries(entries: BindEntry[]): string {
+	const sorted = [...entries].sort((a, b) => a.binding - b.binding);
+	return sorted
+		.map((e) => `${e.binding}=${serializeBindResourceKey(e.resource).keyPart}`)
+		.join(";");
+}
+
+function resolveNativeBindingResource(res: BindResource): GPUBindingResource {
+	if (res instanceof Buffer) {
+		return { buffer: res.native, offset: 0, size: res.size };
+	}
+	if (isBufferSlice(res)) {
+		return {
+			buffer: res.buffer.native,
+			offset: res.offset,
+			size: res.size,
+		};
+	}
+	if (res instanceof Texture) {
+		return res.view;
+	}
+	if (typeof res === "object" && res !== null && "createView" in res && typeof (res as GPUTexture).createView === "function") {
+		return resolveTextureView(res as TextureSourceRef);
+	}
+	return res as GPUBindingResource;
 }
 
 /**
- * GPU bind group wrapper tracking slot index and native GPUBindGroup.
+ * Wrapper around a WebGPU `GPUBindGroup`.
  */
 export class BindTable {
-    readonly native: GPUBindGroup;
-    readonly layout: GPUBindGroupLayout;
-    readonly slot: number;
-    readonly label: string;
+	readonly native: GPUBindGroup;
+	readonly layout: BindLayout | GPUBindGroupLayout;
+	readonly slot?: SlotFrequency | number;
+	readonly dynamicCount: number;
+	readonly label?: string;
 
-    constructor(
-        native: GPUBindGroup,
-        layout: GPUBindGroupLayout,
-        slot: number = SlotFrequency.PerFrame,
-        label = "BindTable"
-    ) {
-        this.native = native;
-        this.layout = layout;
-        this.slot = slot;
-        this.label = label;
-    }
+	private constructor(
+		native: GPUBindGroup,
+		layout: BindLayout | GPUBindGroupLayout,
+		slot: SlotFrequency | number | undefined,
+		dynamicCount: number,
+		label?: string
+	) {
+		this.native = native;
+		this.layout = layout;
+		this.slot = slot;
+		this.dynamicCount = dynamicCount;
+		this.label = label;
+	}
 
-    /**
-     * Factory: Instantiates GPUBindGroup with automated resource resolution.
-     */
-    static create(
-        device: Device | GPUDevice,
-        layout: GPUBindGroupLayout | BindLayout,
-        entries: BindingEntry[],
-        options: { slot?: number; label?: string } = {}
-    ): BindTable {
-        const gpu = resolveDevice(device);
-        const rawLayout = "native" in layout ? layout.native : layout;
-        const slot = options.slot ?? SlotFrequency.PerFrame;
-        const label = options.label ?? "BindTable";
+	static create(device: Device | GPUDevice, desc: BindTableDescriptor): BindTable {
+		const rawDevice = resolveDevice(device);
+		const rawLayout = desc.layout instanceof BindLayout ? desc.layout.native : desc.layout;
 
-        const resolvedEntries: GPUBindGroupEntry[] = new Array(entries.length);
-        for (let i = 0; i < entries.length; i++) {
-            resolvedEntries[i] = {
-                binding: entries[i].binding,
-                resource: resolveBindingResource(entries[i].resource),
-            };
-        }
+		let dynamicCount = desc.dynamicOffsetCount ?? 0;
+		if (desc.layout instanceof BindLayout && desc.dynamicOffsetCount === undefined) {
+			for (const entry of desc.layout.entries) {
+				if (entry.buffer?.hasDynamicOffset) {
+					dynamicCount++;
+				}
+			}
+		}
 
-        const native = gpu.createBindGroup({
-            label,
-            layout: rawLayout,
-            entries: resolvedEntries,
-        });
+		const gpuEntries: GPUBindGroupEntry[] = desc.entries.map((entry) => ({
+			binding: entry.binding,
+			resource: resolveNativeBindingResource(entry.resource),
+		}));
 
-        return new BindTable(native, rawLayout, slot, label);
-    }
+		const native = rawDevice.createBindGroup({
+			label: desc.label,
+			layout: rawLayout,
+			entries: gpuEntries,
+		});
 
-    private static _defaultCache?: BindTableCache;
-
-    /**
-     * Retrieves existing cached BindTable or creates new instance if not present.
-     */
-    static getOrCreate(
-        device: Device | GPUDevice,
-        layout: GPUBindGroupLayout | BindLayout,
-        entries: BindingEntry[],
-        options: { slot?: number; label?: string } = {}
-    ): BindTable {
-        if (!BindTable._defaultCache) {
-            BindTable._defaultCache = new BindTableCache();
-        }
-        return BindTable._defaultCache.getOrCreate(device, layout, entries, options);
-    }
-
-    /**
-     * Clears default BindTable deduplication cache.
-     */
-    static clearCache(): void {
-        BindTable._defaultCache?.clear();
-    }
+		return new BindTable(
+			native,
+			desc.layout,
+			desc.slot,
+			dynamicCount,
+			desc.label
+		);
+	}
 }
 
-let _nextBindResourceId = 1;
-const _bindResourceIdMap = new WeakMap<object, number>();
+export interface BindTableCacheOptions {
+	/** Maximum number of cached BindTables per device before LRU eviction. Defaults to 1024. */
+	maxEntries?: number;
+}
 
-function getResourceId(obj: object): number {
-    let id = _bindResourceIdMap.get(obj);
-    if (id === undefined) {
-        id = _nextBindResourceId++;
-        _bindResourceIdMap.set(obj, id);
-    }
-    return id;
+function serializeBindResourceKey(res: BindResource): { keyPart: string; trackedObjects: object[] } {
+	if (res instanceof Buffer) {
+		return {
+			keyPart: `B:${getResourceId(res.native)}:0:${res.size}`,
+			trackedObjects: [res, res.native],
+		};
+	}
+	if (isBufferSlice(res)) {
+		return {
+			keyPart: `B:${getResourceId(res.buffer.native)}:${res.offset}:${res.size}`,
+			trackedObjects: [res.buffer, res.buffer.native],
+		};
+	}
+	if (res instanceof Texture) {
+		const v = res.view;
+		return {
+			keyPart: `V:${getResourceId(v as unknown as object)}`,
+			trackedObjects: [res, res.native, v as unknown as object],
+		};
+	}
+	if (typeof res === "object" && res !== null && "buffer" in res && !("createView" in res)) {
+		const bBinding = res as GPUBufferBinding;
+		const offset = bBinding.offset ?? 0;
+		const size = bBinding.size ?? (bBinding.buffer.size - offset);
+		return {
+			keyPart: `B:${getResourceId(bBinding.buffer)}:${offset}:${size}`,
+			trackedObjects: [bBinding.buffer],
+		};
+	}
+	if (typeof res === "object" && res !== null && "createView" in res && typeof (res as GPUTexture).createView === "function") {
+		const view = resolveTextureView(res as GPUTexture);
+		return {
+			keyPart: `V:${getResourceId(view as unknown as object)}`,
+			trackedObjects: [res as object, view as unknown as object],
+		};
+	}
+	const obj = res as unknown as object;
+	const ownerTex = getRegisteredTextureViewOwner(res as GPUTextureView);
+	if (ownerTex !== undefined) {
+		return {
+			keyPart: `V:${getResourceId(obj)}`,
+			trackedObjects: [obj, ownerTex as unknown as object],
+		};
+	}
+	return {
+		keyPart: `R:${getResourceId(obj)}`,
+		trackedObjects: [obj],
+	};
+}
+
+interface CachedBindTableEntry {
+	readonly table: BindTable;
+	readonly resources: Set<object>;
+}
+
+interface DeviceBindTableStore {
+	readonly map: Map<string, CachedBindTableEntry>;
+	readonly keysByResource: WeakMap<object, Set<string>>;
 }
 
 /**
- * Computes deterministic lookup key for GPUBindGroupLayout and resource entries.
- */
-export function hashBindingEntries(
-    layout: GPUBindGroupLayout,
-    entries: BindingEntry[]
-): string {
-    const layoutId = getResourceId(layout);
-    const sorted = entries.length > 1
-        ? entries.slice().sort((a, b) => a.binding - b.binding)
-        : entries;
-
-    let key = `${layoutId};`;
-    for (let i = 0; i < sorted.length; i++) {
-        const entry = sorted[i];
-        const res = resolveBindingResource(entry.resource);
-        key += `${entry.binding}:`;
-        if ("buffer" in res) {
-            const bufId = getResourceId(res.buffer);
-            key += `b_${bufId}_${res.offset ?? 0}_${res.size ?? 0};`;
-        } else if (typeof res === "object" && res !== null) {
-            const resId = getResourceId(res as object);
-            key += `r_${resId};`;
-        }
-    }
-    return key;
-}
-
-/**
- * Cache preventing redundant allocation of identical GPUBindGroup instances.
+ * Device-scoped `BindTable` cache with LRU capacity bounding and resource-targeted eviction.
+ *
+ * Ownership contract:
+ * - Can be constructed bound to a single `GPUDevice` (`new BindTableCache(device, options)`)
+ *   or unbound (`new BindTableCache(options)`), in which case entries are partitioned per `GPUDevice`.
+ * - A `BindTable` created on one `GPUDevice` is never returned for another `GPUDevice`.
+ * - `clear()` / `dispose()` evicts cached wrappers without destroying the borrowed `GPUDevice`.
  */
 export class BindTableCache {
-    private _cache = new Map<string, BindTable>();
+	readonly #boundDevice: GPUDevice | null = null;
+	readonly #maxEntries: number;
+	readonly #stores = new WeakMap<GPUDevice, DeviceBindTableStore>();
+	readonly #knownDevices = new Set<GPUDevice>();
 
-    get(key: string): BindTable | undefined {
-        return this._cache.get(key);
-    }
+	constructor(
+		deviceOrOptions?: Device | GPUDevice | BindTableCacheOptions,
+		maybeOptions?: BindTableCacheOptions
+	) {
+		let opts: BindTableCacheOptions | undefined;
+		if (
+			deviceOrOptions &&
+			typeof deviceOrOptions === "object" &&
+			("native" in deviceOrOptions || "createBindGroup" in deviceOrOptions)
+		) {
+			this.#boundDevice = resolveDevice(deviceOrOptions as Device | GPUDevice);
+			opts = maybeOptions;
+		} else {
+			opts = deviceOrOptions as BindTableCacheOptions | undefined;
+		}
+		const maxEntries = opts?.maxEntries ?? 1024;
+		if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+			throw new RangeError(`BindTableCache: maxEntries must be a positive integer, got ${maxEntries}.`);
+		}
+		this.#maxEntries = maxEntries;
+	}
 
-    set(key: string, table: BindTable): void {
-        this._cache.set(key, table);
-    }
+	/** Bound native `GPUDevice` if constructed for a specific device, or null. */
+	get device(): GPUDevice | null {
+		return this.#boundDevice;
+	}
 
-    getOrCreate(
-        device: Device | GPUDevice,
-        layout: GPUBindGroupLayout | BindLayout,
-        entries: BindingEntry[],
-        options: { slot?: number; label?: string } = {}
-    ): BindTable {
-        const rawLayout = "native" in layout ? layout.native : layout;
-        const key = hashBindingEntries(rawLayout, entries);
-        let cached = this._cache.get(key);
-        if (!cached) {
-            cached = BindTable.create(device, rawLayout, entries, options);
-            this._cache.set(key, cached);
-        }
-        return cached;
-    }
+	/** Maximum cached entries per device before LRU eviction. */
+	get maxEntries(): number {
+		return this.#maxEntries;
+	}
 
-    clear(): void {
-        this._cache.clear();
-    }
+	/** Total number of cached `BindTable` entries across active device stores. */
+	get size(): number {
+		let total = 0;
+		for (const dev of this.#knownDevices) {
+			const store = this.#stores.get(dev);
+			if (store) {
+				total += store.map.size;
+			}
+		}
+		return total;
+	}
+
+	#getStore(deviceArg?: Device | GPUDevice): { rawDevice: GPUDevice; store: DeviceBindTableStore } {
+		let rawDevice: GPUDevice;
+		if (deviceArg !== undefined) {
+			rawDevice = resolveDevice(deviceArg);
+			if (this.#boundDevice !== null && this.#boundDevice !== rawDevice) {
+				throw new Error("BindTableCache: device argument does not match the cache's bound GPUDevice.");
+			}
+		} else if (this.#boundDevice !== null) {
+			rawDevice = this.#boundDevice;
+		} else {
+			throw new Error("BindTableCache: a GPUDevice must be provided.");
+		}
+
+		let store = this.#stores.get(rawDevice);
+		if (!store) {
+			store = {
+				map: new Map<string, CachedBindTableEntry>(),
+				keysByResource: new WeakMap<object, Set<string>>(),
+			};
+			this.#stores.set(rawDevice, store);
+			this.#knownDevices.add(rawDevice);
+		}
+		return { rawDevice, store };
+	}
+
+	#removeEntry(store: DeviceBindTableStore, key: string): boolean {
+		const entry = store.map.get(key);
+		if (!entry) {
+			return false;
+		}
+		store.map.delete(key);
+		for (const obj of entry.resources) {
+			const set = store.keysByResource.get(obj);
+			if (set) {
+				set.delete(key);
+				if (set.size === 0) {
+					store.keysByResource.delete(obj);
+				}
+			}
+		}
+		return true;
+	}
+
+	getOrCreate(
+		device: Device | GPUDevice,
+		layout: BindLayout | GPUBindGroupLayout,
+		entries: BindEntry[],
+		options?: { slot?: SlotFrequency | number; label?: string; dynamicOffsetCount?: number }
+	): BindTable {
+		const { rawDevice, store } = this.#getStore(device);
+		const rawLayout = layout instanceof BindLayout ? layout.native : layout;
+		const layoutId = getResourceId(rawLayout);
+
+		let dynamicCount = options?.dynamicOffsetCount ?? 0;
+		if (layout instanceof BindLayout && options?.dynamicOffsetCount === undefined) {
+			for (const e of layout.entries) {
+				if (e.buffer?.hasDynamicOffset) {
+					dynamicCount++;
+				}
+			}
+		}
+
+		const sortedEntries = [...entries].sort((a, b) => a.binding - b.binding);
+		const trackedResources = new Set<object>();
+		const entryKeyParts: string[] = [];
+
+		for (let i = 0; i < sortedEntries.length; i++) {
+			const e = sortedEntries[i];
+			const { keyPart, trackedObjects } = serializeBindResourceKey(e.resource);
+			entryKeyParts.push(`${e.binding}=${keyPart}`);
+			for (let j = 0; j < trackedObjects.length; j++) {
+				trackedResources.add(trackedObjects[j]);
+			}
+		}
+
+		const slotKey = options?.slot !== undefined ? String(options.slot) : "none";
+		const key = `D:${getResourceId(rawDevice)}|L:${layoutId}|S:${slotKey}|DC:${dynamicCount}|${entryKeyParts.join(";")}`;
+
+		const existing = store.map.get(key);
+		if (existing !== undefined) {
+			// Refresh LRU order
+			store.map.delete(key);
+			store.map.set(key, existing);
+			return existing.table;
+		}
+
+		const table = BindTable.create(rawDevice, {
+			layout,
+			entries: sortedEntries,
+			slot: options?.slot,
+			label: options?.label,
+			dynamicOffsetCount: dynamicCount,
+		});
+
+		if (store.map.size >= this.#maxEntries) {
+			const oldestKey = store.map.keys().next().value;
+			if (oldestKey !== undefined) {
+				this.#removeEntry(store, oldestKey);
+			}
+		}
+
+		store.map.set(key, { table, resources: trackedResources });
+		for (const obj of trackedResources) {
+			let set = store.keysByResource.get(obj);
+			if (!set) {
+				set = new Set<string>();
+				store.keysByResource.set(obj, set);
+			}
+			set.add(key);
+		}
+
+		return table;
+	}
+
+	/** Evicts all cached `BindTable` entries that reference `res`. */
+	evictResource(res: object): number {
+		const targets: object[] = [res];
+		if ((res instanceof Texture || res instanceof Buffer) && res.native !== (res as unknown as object)) {
+			targets.push(res.native as unknown as object);
+		}
+		let evicted = 0;
+		for (const dev of this.#knownDevices) {
+			const store = this.#stores.get(dev);
+			if (!store) continue;
+			for (let i = 0; i < targets.length; i++) {
+				const target = targets[i];
+				const keys = store.keysByResource.get(target);
+				if (keys) {
+					const keysSnapshot = [...keys];
+					for (let j = 0; j < keysSnapshot.length; j++) {
+						if (this.#removeEntry(store, keysSnapshot[j])) {
+							evicted++;
+						}
+					}
+					store.keysByResource.delete(target);
+				}
+			}
+		}
+		return evicted;
+	}
+
+	/** Clears all cached `BindTable` entries without destroying any GPUDevice. */
+	clear(): void {
+		for (const dev of this.#knownDevices) {
+			const store = this.#stores.get(dev);
+			if (store) {
+				store.map.clear();
+			}
+			this.#stores.delete(dev);
+		}
+		this.#knownDevices.clear();
+	}
+
+	/** Alias for `clear()`. */
+	dispose(): void {
+		this.clear();
+	}
 }

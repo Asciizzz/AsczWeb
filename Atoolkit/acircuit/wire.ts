@@ -1,40 +1,78 @@
+import { SocketDirection, type Metadata, type SerializedWire } from "./types.js";
+import type { Socket } from "./socket.js";
+
 /**
- * Directed connection between output socket and input socket in Circuit graph.
- *
- * - Output sockets support 1-to-N fan-out.
- * - Input sockets enforce 1-to-1 connection.
+ * Encodes a (chipId, socketName) pair into an unambiguous length-prefixed key.
+ * Distinct pairs never collide even when chipId or socketName contains colons.
  */
-export interface Wire {
-    readonly outChipId: string;
-    readonly outSocket: string;
-    readonly inChipId: string;
-    readonly inSocket: string;
+export function encodeEndpointKey(chipId: string, socketName: string): string {
+	return `${chipId.length}:${chipId}:${socketName}`;
 }
 
 /**
- * Returns the lookup key for a socket endpoint.
+ * Returns the unambiguous length-prefixed key for a wire's destination input endpoint.
  */
-export function inSocketKey(chipId: string, socketName: string): string {
-    return `${chipId}:${socketName}`;
-}
-
-export const outSocketKey = inSocketKey;
-
-/**
- * Compares two Wire instances for matching endpoints.
- */
-export function wireEquals(a: Wire, b: Wire): boolean {
-    return (
-        a.outChipId === b.outChipId &&
-        a.outSocket === b.outSocket &&
-        a.inChipId === b.inChipId &&
-        a.inSocket === b.inSocket
-    );
+export function inSocketKey(wire: Wire): string {
+	return encodeEndpointKey(wire.toChipId, wire.toSocketName);
 }
 
 /**
- * Formats a Wire as (outChip:outSocket -> inChip:inSocket).
+ * Returns the unambiguous length-prefixed key for a wire's source output endpoint.
  */
-export function formatWire(wire: Wire): string {
-    return `(${wire.outChipId}:${wire.outSocket} -> ${wire.inChipId}:${wire.inSocket})`;
+export function outSocketKey(wire: Wire): string {
+	return encodeEndpointKey(wire.fromChipId, wire.fromSocketName);
+}
+
+/**
+ * Validates whether an output socket can connect to an input socket.
+ */
+export function canConnectInput(inSocket: Socket, outSocket: Socket): boolean {
+	if (inSocket.direction !== SocketDirection.Input) return false;
+	if (outSocket.direction !== SocketDirection.Output) return false;
+	return inSocket.acceptsType(outSocket.type);
+}
+
+/**
+ * Directed connection from an output socket on one Chip to an input socket on another Chip.
+ */
+export class Wire {
+	readonly fromChipId: string;
+	readonly fromSocketName: string;
+	readonly toChipId: string;
+	readonly toSocketName: string;
+	readonly metadata: Metadata;
+
+	constructor(
+		fromChipId: string,
+		fromSocketName: string,
+		toChipId: string,
+		toSocketName: string,
+		metadata: Metadata = {}
+	) {
+		this.fromChipId = fromChipId;
+		this.fromSocketName = fromSocketName;
+		this.toChipId = toChipId;
+		this.toSocketName = toSocketName;
+		this.metadata = { ...metadata };
+	}
+
+	toJSON(): SerializedWire {
+		return {
+			fromChipId: this.fromChipId,
+			fromSocketName: this.fromSocketName,
+			toChipId: this.toChipId,
+			toSocketName: this.toSocketName,
+			metadata: { ...this.metadata },
+		};
+	}
+
+	static fromJSON(data: SerializedWire): Wire {
+		return new Wire(
+			data.fromChipId,
+			data.fromSocketName,
+			data.toChipId,
+			data.toSocketName,
+			{ ...data.metadata }
+		);
+	}
 }

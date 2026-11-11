@@ -4,115 +4,189 @@
 
 import { WasmMemory } from "./wasm-memory.js";
 
+const FREE_LIST_SENTINEL = 0xffffffff;
+
+export interface BlockPoolOptions {
+	/**
+	 * When true, grows `memory` during construction if `[offset, offset + blockCount * blockSize)`
+	 * exceeds `memory.byteLength`. Defaults to `false`.
+	 */
+	autoGrow?: boolean;
+}
+
 /**
- * Fixed-size slab allocator managing uniform memory blocks in linear memory.
- * Maintains an intrusive single-linked free-list in the first 4 bytes of idle blocks.
+ * Single-owner fixed-size slab allocator managing uniform memory blocks in `WasmMemory`.
+ *
+ * Ownership and concurrency contract:
+ * - Maintains an intrusive singly-linked free list in the first 4 bytes of idle blocks and an
+ *   allocation bitmap to detect double-release or never-acquired pointers in O(1) time.
+ * - Single-owner and non-thread-safe; concurrent access across workers requires external synchronization.
  */
 export class BlockPool {
-    private readonly _memory: WasmMemory;
-    private readonly _offset: number;
-    private readonly _blockCount: number;
-    private readonly _blockSize: number;
-    private _freeHead: number;
-    private _availableCount: number;
+	readonly #memory: WasmMemory;
+	readonly #offset: number;
+	readonly #blockCount: number;
+	readonly #blockSize: number;
+	readonly #totalByteLength: number;
+	readonly #allocatedBitmap: Uint32Array;
+	#freeHead: number;
+	#availableCount: number;
 
-    constructor(memory: WasmMemory, offset: number, blockCount: number, blockSize: number) {
-        if (blockSize < 4) {
-            throw new Error(`Block size must be at least 4 bytes for intrusive pointer, received ${blockSize}`);
-        }
-        if (blockCount <= 0) {
-            throw new Error(`Block count must be positive, received ${blockCount}`);
-        }
+	constructor(
+		memory: WasmMemory,
+		offset: number,
+		blockCount: number,
+		blockSize: number,
+		options?: BlockPoolOptions
+	) {
+		if (!Number.isSafeInteger(offset) || offset < 0) {
+			throw new RangeError(`BlockPool: offset must be a non-negative integer, received ${offset}.`);
+		}
+		if (!Number.isSafeInteger(blockCount) || blockCount < 1) {
+			throw new RangeError(`BlockPool: blockCount must be a positive integer, received ${blockCount}.`);
+		}
+		if (!Number.isSafeInteger(blockSize) || blockSize < 4) {
+			throw new RangeError(
+				`BlockPool: blockSize must be an integer >= 4 bytes, received ${blockSize}.`
+			);
+		}
 
-        const totalBytes = blockCount * blockSize;
-        if (offset + totalBytes > memory.byteLength) {
-            const neededPages = Math.ceil((offset + totalBytes - memory.byteLength) / WasmMemory.PAGE_SIZE);
-            memory.grow(neededPages);
-        }
+		const totalBytes = blockCount * blockSize;
+		const endOffset = offset + totalBytes;
+		if (!Number.isSafeInteger(endOffset) || endOffset > FREE_LIST_SENTINEL) {
+			throw new RangeError(
+				`BlockPool: span [${offset}, ${endOffset}) exceeds wasm32 address bounds.`
+			);
+		}
 
-        this._memory = memory;
-        this._offset = offset;
-        this._blockCount = blockCount;
-        this._blockSize = blockSize;
-        this._freeHead = offset;
-        this._availableCount = blockCount;
+		if (endOffset > memory.byteLength) {
+			if (options?.autoGrow) {
+				const neededPages = Math.ceil((endOffset - memory.byteLength) / WasmMemory.PAGE_SIZE);
+				memory.grow(neededPages);
+			} else {
+				throw new RangeError(
+					`BlockPool: span [${offset}, ${endOffset}) exceeds memory byteLength (${memory.byteLength}).`
+				);
+			}
+		}
 
-        this.formatFreeList();
-    }
+		this.#memory = memory;
+		this.#offset = offset;
+		this.#blockCount = blockCount;
+		this.#blockSize = blockSize;
+		this.#totalByteLength = totalBytes;
+		this.#allocatedBitmap = new Uint32Array(Math.ceil(blockCount / 32));
+		this.#freeHead = offset;
+		this.#availableCount = blockCount;
 
-    private formatFreeList(): void {
-        const view = new DataView(this._memory.buffer);
-        let ptr = this._offset;
+		this.reset();
+	}
 
-        for (let i = 0; i < this._blockCount - 1; i++) {
-            const nextPtr = ptr + this._blockSize;
-            view.setUint32(ptr, nextPtr, true);
-            ptr = nextPtr;
-        }
+	/**
+	 * Reinitializes all blocks as free and clears the allocation bitmap.
+	 */
+	reset(): void {
+		const view = new DataView(this.#memory.buffer);
+		let ptr = this.#offset;
 
-        // Final block terminator: 0xFFFFFFFF
-        view.setUint32(ptr, 0xffffffff, true);
-        this._freeHead = this._offset;
-        this._availableCount = this._blockCount;
-    }
+		for (let i = 0; i < this.#blockCount - 1; i++) {
+			const nextPtr = ptr + this.#blockSize;
+			view.setUint32(ptr, nextPtr, true);
+			ptr = nextPtr;
+		}
 
-    /**
-     * Acquires a free block from the intrusive stack in O(1) time.
-     * Returns byte offset pointer, or -1 when pool is exhausted.
-     */
-    public acquire(): number {
-        if (this._freeHead === 0xffffffff || this._availableCount === 0) {
-            return -1;
-        }
+		view.setUint32(ptr, FREE_LIST_SENTINEL, true);
+		this.#allocatedBitmap.fill(0);
+		this.#freeHead = this.#offset;
+		this.#availableCount = this.#blockCount;
+	}
 
-        const allocatedPtr = this._freeHead;
-        const view = new DataView(this._memory.buffer);
-        this._freeHead = view.getUint32(allocatedPtr, true);
-        this._availableCount -= 1;
+	/**
+	 * Acquires a free block from the pool in O(1) time.
+	 * Returns the byte offset pointer, or `-1` when the pool is exhausted.
+	 */
+	acquire(): number {
+		if (this.#freeHead === FREE_LIST_SENTINEL || this.#availableCount === 0) {
+			return -1;
+		}
 
-        return allocatedPtr;
-    }
+		const allocatedPtr = this.#freeHead;
+		const blockIdx = (allocatedPtr - this.#offset) / this.#blockSize;
+		const view = new DataView(this.#memory.buffer);
+		this.#freeHead = view.getUint32(allocatedPtr, true);
+		this.#availableCount -= 1;
 
-    /**
-     * Releases an allocated block back to the intrusive stack in O(1) time.
-     */
-    public release(pointer: number): void {
-        if (pointer < this._offset || pointer >= this._offset + this._blockCount * this._blockSize) {
-            throw new Error(`Pointer ${pointer} falls outside block pool span`);
-        }
+		const wordIdx = blockIdx >>> 5;
+		const bitMask = 1 << (blockIdx & 31);
+		this.#allocatedBitmap[wordIdx] |= bitMask;
 
-        const offsetWithinPool = pointer - this._offset;
-        if (offsetWithinPool % this._blockSize !== 0) {
-            throw new Error(`Pointer ${pointer} is not aligned to block boundary of ${this._blockSize} bytes`);
-        }
+		return allocatedPtr;
+	}
 
-        const view = new DataView(this._memory.buffer);
-        view.setUint32(pointer, this._freeHead, true);
-        this._freeHead = pointer;
-        this._availableCount += 1;
-    }
+	/**
+	 * Releases an allocated block back to the pool in O(1) time.
+	 * Throws if `pointer` is outside the pool span, misaligned, or not currently allocated.
+	 */
+	release(pointer: number): void {
+		if (
+			!Number.isSafeInteger(pointer) ||
+			pointer < this.#offset ||
+			pointer >= this.#offset + this.#totalByteLength
+		) {
+			throw new RangeError(
+				`BlockPool.release: pointer ${pointer} falls outside pool span [${this.#offset}, ${this.#offset + this.#totalByteLength}).`
+			);
+		}
 
-    public get capacity(): number {
-        return this._blockCount;
-    }
+		const offsetWithinPool = pointer - this.#offset;
+		if (offsetWithinPool % this.#blockSize !== 0) {
+			throw new RangeError(
+				`BlockPool.release: pointer ${pointer} is not aligned to block boundary (${this.#blockSize} bytes).`
+			);
+		}
 
-    public get available(): number {
-        return this._availableCount;
-    }
+		const blockIdx = offsetWithinPool / this.#blockSize;
+		const wordIdx = blockIdx >>> 5;
+		const bitMask = 1 << (blockIdx & 31);
 
-    public get blockSize(): number {
-        return this._blockSize;
-    }
+		if ((this.#allocatedBitmap[wordIdx] & bitMask) === 0) {
+			throw new Error(
+				`BlockPool.release: pointer ${pointer} (block ${blockIdx}) is not currently allocated.`
+			);
+		}
 
-    public get offset(): number {
-        return this._offset;
-    }
+		this.#allocatedBitmap[wordIdx] &= ~bitMask;
+		const view = new DataView(this.#memory.buffer);
+		view.setUint32(pointer, this.#freeHead, true);
+		this.#freeHead = pointer;
+		this.#availableCount += 1;
+	}
 
-    public get totalByteLength(): number {
-        return this._blockCount * this._blockSize;
-    }
+	get capacity(): number {
+		return this.#blockCount;
+	}
 
-    public get memory(): WasmMemory {
-        return this._memory;
-    }
+	get available(): number {
+		return this.#availableCount;
+	}
+
+	get allocated(): number {
+		return this.#blockCount - this.#availableCount;
+	}
+
+	get blockSize(): number {
+		return this.#blockSize;
+	}
+
+	get offset(): number {
+		return this.#offset;
+	}
+
+	get totalByteLength(): number {
+		return this.#totalByteLength;
+	}
+
+	get memory(): WasmMemory {
+		return this.#memory;
+	}
 }

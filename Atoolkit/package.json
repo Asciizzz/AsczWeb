@@ -1,7 +1,7 @@
 {
 	"name": "@asciiz/atoolkit",
-	"version": "0.1.2",
-	"description": "High-performance computational and graphics engineering toolkit for WebGPU, WebAssembly, linear algebra, and ECS.",
+	"version": "0.2.0",
+	"description": "Computational and graphics engineering toolkit for WebGPU, WebAssembly, linear algebra, ECS, temporal curves, and dataflow circuits.",
 	"type": "module",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -70,10 +70,15 @@
 	"files": [
 		"dist",
 		"ReadMe.md",
+		"*/ReadMe.md",
+		"MIGRATION.md",
 		"LICENSE"
 	],
 	"scripts": {
-		"build": "tsc -p tsconfig.json",
+		"clean": "node -e \"const fs=require('node:fs'),path=require('node:path');const d=path.resolve(process.cwd(),'dist');if(path.basename(d)==='dist'&&path.basename(process.cwd())==='Atoolkit')fs.rmSync(d,{recursive:true,force:true});\"",
+		"build": "npm run clean && tsc -p tsconfig.json",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"prepack": "npm run build",
 		"prepublishOnly": "npm run build"
 	},
 	"author": "Asciizzz",
